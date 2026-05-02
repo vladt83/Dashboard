@@ -105,3 +105,6 @@ temp/
 *.db
 *.sqlite
 *.sqlite3
+
+# Bundled API entry — built from api/_handler.ts on each deploy
+api/index.js
