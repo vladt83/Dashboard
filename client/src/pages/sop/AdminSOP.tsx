@@ -79,15 +79,7 @@ export default function AdminSOP() {
             </Tip>
           </Step>
 
-          <Step n={3} title="Monthly — review subscription verifications">
-            <p>
-              Ariana runs the verifications, but you should glance at the
-              integrity audit tab to make sure she's actually doing it. The
-              audit pulls 5 random subscribers — spot-check one or two yourself.
-            </p>
-          </Step>
-
-          <Step n={4} title="As needed — manage users">
+          <Step n={3} title="As needed — manage users">
             <p>
               <span className="text-foreground font-medium">User Management</span> lets you create accounts, change roles, reset
               permissions, or disable users who've left. Created here = bypasses
@@ -118,12 +110,12 @@ export default function AdminSOP() {
             ]} />
           </Step>
 
-          <Step n={5} title="Quarterly — review commission rates">
+          <Step n={4} title="Quarterly — review commission rates">
             <p>
               Settings → Commission Rates. The defaults: closers got 15%
               Jan–Feb 2026, dropped to 10% from March 2026 onward. Kresha
-              (setter) is on a flat 3% with the $6K cap. Unless the business
-              changes, leave them alone.
+              Setters earn a flat 3% on closed one-time sales they're attributed
+              to. Unless the business changes, leave them alone.
             </p>
 
             <Warning>
@@ -148,11 +140,9 @@ export default function AdminSOP() {
             headers={["Trigger", "What the system does automatically"]}
             rows={[
               ["Setter books a call", "Creates row in bookedCalls. Visible to closer + admin."],
-              ["Closer marks a deal closed", "Calculates closer commission (10% of cash) + setter commission (3% of capped cash)."],
+              ["Closer marks a deal closed", "Calculates closer commission (10% of cash) + setter commission (3% of cash, if a setter is attributed)."],
               ["Admin or closer edits a deal", "Re-calculates both commissions based on new amounts."],
-              ["Subscription verified for the month", "Generates 25% commission for the originating closer."],
-              ["Subscription marked cancelled", "Stops commission. Notifies the closer. Records cancellation date."],
-              ["Coach logs a session (Leo)", "Adds minutes × $0.90 to month total. Hits cap at $2,000."],
+              ["Coach logs a session (Leo)", "Adds minutes × $0.90 + $15 per no-show to monthly pay."],
               ["Coach logs a session (Elliot/Erin)", "Tracking only — no pay calculation."],
               ["Payroll marks a payout paid", "Updates payrollEntries.isPaid; appears as fulfilled in Payroll Dashboard."],
             ]}
@@ -176,7 +166,6 @@ export default function AdminSOP() {
               "Don't change historic commission rates.",
               "Don't delete deals to 'clean up' — edit instead. Deletion loses history.",
               "Don't share your admin login. Create a new admin user if needed.",
-              "Don't bypass the audit gate on subscriptions — it's the only fraud check.",
             ]}
           />
         </CardContent>
@@ -190,7 +179,6 @@ export default function AdminSOP() {
           <ol className="space-y-2 text-sm">
             <li className="flex gap-3"><span className="text-primary font-bold">1.</span><span>Daily → glance at Dashboard's 3 tabs.</span></li>
             <li className="flex gap-3"><span className="text-primary font-bold">2.</span><span>Weekly → audit setter attribution on closed deals.</span></li>
-            <li className="flex gap-3"><span className="text-primary font-bold">3.</span><span>Monthly → spot-check Ariana's subscription audit.</span></li>
             <li className="flex gap-3"><span className="text-primary font-bold">4.</span><span>Quarterly → review whether commission rates still make sense.</span></li>
             <li className="flex gap-3"><span className="text-primary font-bold">5.</span><span>As needed → User Management for onboarding/offboarding.</span></li>
           </ol>

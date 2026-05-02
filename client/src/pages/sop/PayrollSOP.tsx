@@ -15,7 +15,7 @@ export default function PayrollSOP() {
         role="Payroll"
         who="Ariana Tayman"
         color="text-pink-400"
-        mission="Process every payout on time. Verify subscriptions monthly. Be the source of truth for what's been paid out and what's owed. Quiet, accurate, on schedule."
+        mission="Process every payout on time. Be the source of truth for what's been paid out and what's owed. Quiet, accurate, on schedule."
       />
 
       <Card>
@@ -23,11 +23,10 @@ export default function PayrollSOP() {
           <CardTitle>Your Domain — 4 Pages</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             <PageCard icon={ClipboardCheck} title="Payroll Dashboard" desc="Bird's-eye view of who's owed what, by category." />
             <PageCard icon={Wallet} title="Commission Payouts" desc="Mark closer + setter commissions paid." />
             <PageCard icon={CalendarDays} title="Payment Plans" desc="Collect monthly payments from clients on plans." />
-            <PageCard icon={Users} title="Subscriptions" desc="Monthly verification + integrity audit of active subscribers." />
           </div>
         </CardContent>
       </Card>
@@ -82,8 +81,8 @@ export default function PayrollSOP() {
             </MockScreen>
 
             <CalloutList items={[
-              { n: 1, text: <>Closer commissions are auto-calculated using each closer's rate (15% Jan–Feb, 10% from March) on cash collected. Closers also earn 25% on each verified subscription month.</> },
-              { n: 2, text: <>Kresha's setter commission is 3% × min(deal cash, $6,000), summed across her attributed <span className="font-medium">one-time sales only</span>. Subscriptions don't pay setter commission.</> },
+              { n: 1, text: <>Closer commissions are auto-calculated using each closer's rate (15% Jan–Feb, 10% from March, 9% on in-house plans) on cash collected.</> },
+              { n: 2, text: <>Setter commission is 3% × cash collected, summed across deals where they were attributed.</> },
               { n: 3, text: <>Send the actual money via your normal channel (bank transfer / Wise / etc.), then click "Mark Paid" so the row reflects reality.</> },
             ]} />
 
@@ -96,7 +95,7 @@ export default function PayrollSOP() {
           <Step n={3} title="Process Coaching + Operations + Marketing">
             <p>
               Same pattern — but these are flat-rate. Elliot ($2,050 bi-weekly),
-              Erin ($2,500 bi-weekly), Leo (variable, capped at $2K/month).
+              Erin ($2,500 bi-weekly), Leo (variable per minute).
               Vendors (Shyft Filming $1,800/mo, Shyft Ads $500/mo) are autopay
               — no action needed.
             </p>
@@ -132,37 +131,6 @@ export default function PayrollSOP() {
             </Why>
           </Step>
 
-          <Step n={5} title="Verify subscriptions every month">
-            <p>
-              Open <span className="text-foreground font-medium">Subscriptions</span>. Each month the system generates a verification list for every active subscriber. Walk through them — confirm they're still in the group, then click verify (or mark cancelled).
-            </p>
-
-            <MockScreen title="Subscriptions — Monthly Verification" badge="April 2026">
-              <MockTable
-                headers={["Client", "Closer", "Monthly", "Status", "Action"]}
-                rows={[
-                  ["Marcus Johnson", "Steve Lapa",     "$300", "Active",    "Verify"],
-                  ["Sarah Williams", "Jhalil Timazee", "$300", "Active",    "Verify"],
-                  ["Tony Ramirez",   "Jake Glass",     "$300", { value: "Cancelled?", tone: "warning" }, "Mark Cancelled"],
-                ]}
-              />
-            </MockScreen>
-
-            <Why>
-              Verified subscribers generate 25% commission for the closer who
-              signed them up. Cancelled subscribers stop earning commission and
-              the closer gets an automatic notification. This is how the
-              recurring side of the business stays honest — your monthly
-              verification is the integrity gate.
-            </Why>
-
-            <Tip>
-              The Integrity Audit tab shows 5 random subscribers each month —
-              spot-check them by actually opening the group/Discord and
-              confirming the person is still there. Catches both fraud and
-              honest mistakes.
-            </Tip>
-          </Step>
 
         </CardContent>
       </Card>
@@ -209,7 +177,6 @@ export default function PayrollSOP() {
           <DoDont
             dos={[
               "Mark items paid only after the money has actually moved.",
-              "Verify subscriptions every single month — don't skip.",
               "Always include a written reason on adjustments.",
               "Use the integrity audit to catch fraud or mistakes.",
             ]}
@@ -233,7 +200,6 @@ export default function PayrollSOP() {
             <li className="flex gap-3"><span className="text-primary font-bold">2.</span><span>Pay closers + setter → mark paid in <span className="text-foreground font-medium">Commission Payouts</span>.</span></li>
             <li className="flex gap-3"><span className="text-primary font-bold">3.</span><span>Pay coaches + W2 → same dashboard.</span></li>
             <li className="flex gap-3"><span className="text-primary font-bold">4.</span><span>Collect payment plan installments in <span className="text-foreground font-medium">Payment Plans</span> as money hits.</span></li>
-            <li className="flex gap-3"><span className="text-primary font-bold">5.</span><span>Verify subscriptions monthly + run the audit.</span></li>
           </ol>
         </CardContent>
       </Card>

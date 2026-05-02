@@ -19,8 +19,8 @@ type RoleEntry = {
 const ROLES: RoleEntry[] = [
   {
     role: "Setter",
-    who: "Kresha Koirala",
-    one_liner: "Books calls from text outreach, assigns to a closer. Earns 3% on closed one-time sales (capped at $6K cash; subscriptions excluded).",
+    who: "Kresha Koirala (Call Setting · 3%) · Jake Glass (Pre Call · 2%)",
+    one_liner: "Setters fill the closer's calendar — Kresha sets calls from text outreach (3%), Jake runs 5-question pre calls right after VSL bookings (2%). Both earn on closed deals they're attributed to once DocuSign is signed.",
     href: "/sop/setter",
     icon: PhoneIncoming,
     color: "text-blue-400",
@@ -28,8 +28,8 @@ const ROLES: RoleEntry[] = [
   },
   {
     role: "Closer",
-    who: "Steve Lapa · Jhalil Timazee · Jake Glass",
-    one_liner: "Takes calls, closes deals, logs entries. Earns 10% on cash + 25% recurring on subscriptions.",
+    who: "Steve Lapa · Jhalil Timazee",
+    one_liner: "Reads setter intel, takes calls, closes deals, logs entries. Earns 10% on cash collected (9% on in-house plans, 15% Jan–Feb '26).",
     href: "/sop/closer",
     icon: TrendingUp,
     color: "text-green-400",
@@ -47,7 +47,7 @@ const ROLES: RoleEntry[] = [
   {
     role: "Payroll",
     who: "Ariana Tayman",
-    one_liner: "Processes payouts, verifies subscriptions, applies adjustments. Source of truth on what's paid.",
+    one_liner: "Processes payouts and applies adjustments. Source of truth on what's paid.",
     href: "/sop/payroll",
     icon: DollarSign,
     color: "text-pink-400",
@@ -154,24 +154,24 @@ export default function SOPHub() {
                 </tr>
                 <tr className="border-b border-border/30">
                   <td className="py-2.5">Closer</td>
-                  <td className="py-2.5">Active subscription (recurring)</td>
-                  <td className="py-2.5 text-primary font-semibold">25%</td>
-                  <td className="py-2.5 text-muted-foreground">while active</td>
+                  <td className="py-2.5">
+                    Cash collected on <span className="font-medium">in-house plan</span> deal
+                    <span className="block text-xs text-muted-foreground">(Fanbasis / Denefits / Client Financing — overrides time-based rate)</span>
+                  </td>
+                  <td className="py-2.5 text-primary font-semibold">9%</td>
+                  <td className="py-2.5 text-amber-400 font-semibold">offsets TF financing fees</td>
                 </tr>
                 <tr className="border-b border-border/30">
                   <td className="py-2.5">Setter</td>
-                  <td className="py-2.5">
-                    Closed <span className="font-medium">one-time sale</span> she sourced
-                    <span className="block text-xs text-muted-foreground">(subscriptions excluded)</span>
-                  </td>
+                  <td className="py-2.5">Closed deal they sourced</td>
                   <td className="py-2.5 text-primary font-semibold">3%</td>
-                  <td className="py-2.5 text-amber-400 font-semibold">$6,000 cash / deal</td>
+                  <td className="py-2.5 text-muted-foreground">—</td>
                 </tr>
                 <tr className="border-b border-border/30">
                   <td className="py-2.5">Coach (Leo)</td>
                   <td className="py-2.5">Per minute</td>
                   <td className="py-2.5 text-primary font-semibold">$0.90/min + $15/no-show</td>
-                  <td className="py-2.5 text-amber-400 font-semibold">$2,000/month</td>
+                  <td className="py-2.5 text-muted-foreground">—</td>
                 </tr>
                 <tr>
                   <td className="py-2.5">Coach (Elliot, Erin)</td>

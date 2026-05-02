@@ -117,7 +117,7 @@ export default function CloserSOP() {
             <CalloutList items={[
               { n: 1, text: <><span className="text-foreground font-medium">Client name.</span> Use the same name on the booking — keeps Kresha's records and yours aligned.</> },
               { n: 2, text: <><span className="text-foreground font-medium">Closer.</span> Auto-filled to you; you can't change it (admin can).</> },
-              { n: 3, text: <><span className="text-foreground font-medium">Setter dropdown — IMPORTANT.</span> If Kresha booked this call, pick her here. If it was your own lead, leave it on "Self-generated lead." Without this, Kresha won't get her 3%. <span className="text-muted-foreground">(Note: setters earn only on one-time sales — they don't appear on the subscription form.)</span></> },
+              { n: 3, text: <><span className="text-foreground font-medium">Setter dropdown — IMPORTANT.</span> If a setter sourced this prospect (Kresha via text, Jake via VSL discovery), pick them here. If it was your own lead, leave it on "Self-generated lead." Without this, the setter doesn't get their 3%.</> },
               { n: 4, text: <><span className="text-foreground font-medium">Total deal amount.</span> Whole contract value — including future payment-plan months.</> },
               { n: 5, text: <><span className="text-foreground font-medium">New cash collected.</span> What hit the account today. For BNPL, this is net after the BNPL fee. For payment plans, this is the down payment.</> },
               { n: 6, text: <><span className="text-foreground font-medium">Save Deal.</span> The system instantly calculates your commission and Kresha's (if she was attributed).</> },
@@ -192,7 +192,7 @@ export default function CloserSOP() {
             rows={[
               ["Jan–Feb 2026 deals", { value: "15%", tone: "primary", bold: true }, "Total cash collected (new + existing)"],
               ["March 2026 onward", { value: "10%", tone: "primary", bold: true }, "Total cash collected (new + existing)"],
-              ["Subscriptions (active)", { value: "25%", tone: "primary", bold: true }, "Monthly subscription amount, recurring"],
+              ["In-house payment plan deals", { value: "9%", tone: "primary", bold: true }, "Replaces the rate above — offsets TF's financing fees on Fanbasis / Denefits / Client Financing"],
             ]}
           />
 
@@ -216,14 +216,14 @@ export default function CloserSOP() {
               total="$950.00"
             />
             <ExampleCard
-              label="Payment plan"
+              label="In-house payment plan"
               breakdown={[
                 ["Down payment", "$1,500"],
-                ["Rate", "10%"],
-                ["First month", "$150"],
-                ["+ each month collected", "$50/mo × 6"],
+                ["Rate", "9% (in-house)"],
+                ["First month", "$135"],
+                ["+ each month collected", "$45/mo × 6"],
               ]}
-              total="$450.00 over 6 mo"
+              total="$405.00 over 6 mo"
             />
           </div>
         </CardContent>

@@ -1,6 +1,7 @@
-import { eq, and, desc, sql, isNull } from "drizzle-orm";
+import { eq, and, desc, sql, isNull, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
+import bcrypt from "bcryptjs";
 import { 
   InsertUser, users, 
   deals, InsertDeal, Deal,
@@ -14,11 +15,20 @@ import {
   payees, InsertPayee, Payee,
   payeePayments, InsertPayeePayment, PayeePayment,
   marketingCosts, InsertMarketingCost, MarketingCost,
-  subscriptions, InsertSubscription, Subscription,
-  subscriptionVerifications, InsertSubscriptionVerification, SubscriptionVerification,
+
+
   bookedCalls, InsertBookedCall, BookedCall,
-  dailyStats, InsertDailyStat, DailyStat
+  dailyStats, InsertDailyStat, DailyStat,
+  vslCallPreps, InsertVslCallPrep, VslCallPrep,
+  dealOnboardings, InsertDealOnboarding, DealOnboarding,
+  extensionAlerts, InsertExtensionAlert, ExtensionAlert,
+  tradingLogs, InsertTradingLog, TradingLog,
+  tradeEntries, InsertTradeEntry, TradeEntry,
+  loginTokens, InsertLoginToken, LoginToken,
 } from "../drizzle/schema";
+
+// crypto for generating opaque magic-link tokens
+import { randomBytes } from "node:crypto";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 let _pool: Pool | null = null;
@@ -149,8 +159,9 @@ export async function createUserWithPassword(data: {
   email: string;
   name: string;
   passwordHash: string;
-  role?: "closer" | "payroll" | "admin" | "coach" | "setter";
+  role?: "closer" | "payroll" | "admin" | "coach" | "setter" | "client";
   permissions?: string[];
+  clientDealId?: number | null;
 }) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
@@ -162,10 +173,65 @@ export async function createUserWithPassword(data: {
     loginMethod: "email",
     role: data.role || "closer",
     permissions: data.permissions ? JSON.stringify(data.permissions) : null,
+    clientDealId: data.clientDealId ?? null,
     openId: `email-${Date.now()}-${Math.random().toString(36).substring(7)}`, // Generate unique openId for compatibility
   }).returning({ insertId: users.id });
 
   return getUserById(insertId);
+}
+
+/**
+ * Create a client login. Called from the Client Profile page by Ariana / admin
+ * when onboarding a new client. The client gets their own /dashboard with the
+ * trading log, assigned coach card, and Skool link.
+ *
+ * Idempotency: if a user with this email already exists, returns it as-is.
+ * Caller should detect that case via the `created: false` flag.
+ */
+export async function createClientLogin(input: {
+  dealId: number;
+  email: string;
+  name: string;
+  plainPassword: string;
+  createdByUserId: number;
+}): Promise<{ user: NonNullable<Awaited<ReturnType<typeof getUserById>>>; created: boolean }> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  // Confirm the deal exists — we don't want orphan client accounts.
+  const deal = await getDealById(input.dealId);
+  if (!deal) throw new Error(`Deal #${input.dealId} not found`);
+
+  const email = input.email.toLowerCase().trim();
+
+  // Idempotent: if the email is already in users, just attach to the deal
+  // (if not already attached) and return.
+  const existing = await getUserByEmail(email);
+  if (existing) {
+    if (existing.role !== "client") {
+      throw new Error(`Email ${email} is already in use by a non-client account.`);
+    }
+    if (existing.clientDealId !== input.dealId) {
+      await db.update(users)
+        .set({ clientDealId: input.dealId })
+        .where(eq(users.id, existing.id));
+    }
+    const refreshed = await getUserById(existing.id);
+    if (!refreshed) throw new Error("User vanished after update");
+    return { user: refreshed, created: false };
+  }
+
+  const passwordHash = await bcrypt.hash(input.plainPassword, 10);
+  const created = await createUserWithPassword({
+    email,
+    name: input.name,
+    passwordHash,
+    role: "client",
+    permissions: ["/", "/trading-log"],
+    clientDealId: input.dealId,
+  });
+  if (!created) throw new Error("User creation failed");
+  return { user: created, created: true };
 }
 
 export async function getAllUsers() {
@@ -407,6 +473,29 @@ export function calculateCloserCommission(
 }
 
 /**
+ * In-house payment plan deals (Fanbasis / Denefits / Client Financing) pay
+ * the closer 9% — slightly below the standard rate to offset the financing
+ * fees TF absorbs on these deals. Use this rate any time we calculate a
+ * closer commission against a deal whose paymentType === "in_house_payment_plan".
+ */
+export const IN_HOUSE_PAYMENT_PLAN_CLOSER_RATE = 0.09;
+
+/**
+ * Pick the right closer commission rate for a deal. Returns the in-house
+ * 9% override when applicable, else falls back to the time-based rate
+ * (15% Jan-Feb 2026, 10% from March 2026 onward) read from commissionRates.
+ */
+export function effectiveCloserRate(
+  paymentType: string | null | undefined,
+  fallbackRate: number
+): number {
+  if (paymentType === "in_house_payment_plan") {
+    return IN_HOUSE_PAYMENT_PLAN_CLOSER_RATE;
+  }
+  return fallbackRate;
+}
+
+/**
  * Calculate setter commission
  * - $20 if showed AND prepared (regardless of close)
  * - 3% of cash collected if closed
@@ -550,39 +639,130 @@ export async function getCloserStats(closerId: number, year: number, month: numb
     showedCount: 0,
     preparedCount: 0,
     closedCount: 0,
+    // Three buckets for the dashboard chart:
+    //   - financedFuture: outstanding balance on in-house payment plans
+    //     (Fanbasis / Denefits) — money the company will collect later.
+    //   - bnplFees: total fees absorbed across closed BNPL deals.
+    //   - bnplGross: total deal value financed via BNPL (the closer was
+    //     paid net upfront; client owes the BNPL provider over time).
+    financedFuture: 0,
+    bnplFees: 0,
+    bnplGross: 0,
   };
-  
+
   for (const deal of deals) {
     const dealAmount = parseFloat(deal.totalDealAmount || "0");
     const newCash = parseFloat(deal.newCashCollected || "0");
     const existingCash = parseFloat(deal.existingCashCollected || "0");
     const closerComm = parseFloat(deal.closerCommission || "0");
-    
+    const downPayment = parseFloat(deal.downPayment || "0");
+    const bnplFee = parseFloat(deal.bnplFee || "0");
+
     stats.totalRevenue += dealAmount;
     stats.newCashCollected += newCash;
     stats.existingCashCollected += existingCash;
     stats.totalCashCollected += newCash + existingCash;
     stats.closerCommission += closerComm;
     stats.dealCount++;
-    
+
     if (deal.showed) stats.showedCount++;
     if (deal.prepared) stats.preparedCount++;
     if (deal.closed) stats.closedCount++;
+
+    // Financed-future + BNPL splits only count for closed deals
+    if (deal.closed) {
+      if (deal.paymentType === "in_house_payment_plan") {
+        // What the client still owes us on the in-house plan
+        stats.financedFuture += Math.max(0, dealAmount - downPayment);
+      } else if (deal.paymentType === "bnpl") {
+        stats.bnplFees += bnplFee;
+        stats.bnplGross += dealAmount;
+      }
+    }
   }
 
-  // Add subscription commissions
-  const subCommissions = await getSubscriptionCommissionsByCloser(closerId, year, month);
-  stats.closerCommission += subCommissions.totalCommission;
-  
+  // Fold in imported historical data from `dailyStats` (the spreadsheet import).
+  // This is what makes Jan–Apr 2026 actuals visible on the dashboard.
+  const imported = await aggregateImportedStatsForCloser(closerId, year, month);
+  stats.totalRevenue += imported.totalRevenue;
+  stats.newCashCollected += imported.newCashCollected;
+  stats.existingCashCollected += imported.existingCashCollected;
+  stats.totalCashCollected += imported.totalCashCollected;
+  stats.closerCommission += imported.closerCommission;
+  stats.dealCount += imported.dealCount;
+  stats.showedCount += imported.showedCount;
+  stats.preparedCount += imported.preparedCount;
+  stats.closedCount += imported.closedCount;
+
   return {
     ...stats,
-    subscriptionCommission: subCommissions.totalCommission,
-    subscriptionVerifiedCount: subCommissions.verifiedCount,
     totalDeals: stats.dealCount,
   };
 }
 
 // getSetterStats removed - setters no longer tracked
+
+/**
+ * Sum imported `dailyStats` rows for a given closer + month, and compute
+ * the commission those rows would have generated using the closer's
+ * commission rate at the time. This lets the dashboard and leaderboard
+ * unify imported historical data with live per-deal data without either
+ * source double-counting.
+ */
+async function aggregateImportedStatsForCloser(
+  closerId: number,
+  year: number,
+  month: number
+): Promise<{
+  totalCashCollected: number;
+  newCashCollected: number;
+  existingCashCollected: number;
+  totalRevenue: number;
+  dealCount: number;          // bookings count
+  showedCount: number;
+  closedCount: number;
+  preparedCount: number;
+  closerCommission: number;
+}> {
+  const db = await getDb();
+  const empty = {
+    totalCashCollected: 0, newCashCollected: 0, existingCashCollected: 0,
+    totalRevenue: 0, dealCount: 0, showedCount: 0, closedCount: 0,
+    preparedCount: 0, closerCommission: 0,
+  };
+  if (!db) return empty;
+
+  const { start, end } = dateRangeForMonth(year, month);
+  const rows = await db.select().from(dailyStats).where(and(
+    eq(dailyStats.closerId, closerId),
+    sql`${dailyStats.statDate} >= ${start}`,
+    sql`${dailyStats.statDate} <= ${end}`,
+  ));
+
+  // Apply the closer's per-day commission rate (15% Jan-Feb 2026, 10% from
+  // March 2026). Looking up rate row-by-row keeps the math correct if
+  // anyone changes a rate retroactively.
+  const acc = { ...empty };
+  for (const r of rows) {
+    const cash = parseFloat(r.cashCollected?.toString() || "0");
+    const rev = parseFloat(r.revGenerated?.toString() || "0");
+    acc.totalCashCollected += cash;
+    acc.newCashCollected += cash;  // imported sheet doesn't split new vs existing
+    acc.totalRevenue += rev;
+    acc.dealCount += r.booked;
+    acc.showedCount += r.showed;
+    acc.closedCount += r.closed;
+    acc.preparedCount += r.showed; // sheet didn't track preparedness; treat showed as prepared
+
+    // Pull the closer's rate for this exact date and apply.
+    // Parse the stored YYYY-MM-DD without TZ — see parseYearMonth in routers.ts.
+    const [yStr, mStr] = String(r.statDate).split("-");
+    const rate = await getCommissionRate(closerId, parseInt(yStr, 10), parseInt(mStr, 10));
+    const rateValue = rate ? parseFloat(rate.rate) : 0.10;
+    acc.closerCommission += cash * rateValue;
+  }
+  return acc;
+}
 
 export async function getMonthlyStats(year: number, month: number) {
   const monthDeals = await getDealsByMonth(year, month);
@@ -604,19 +784,34 @@ export async function getMonthlyStats(year: number, month: number) {
     const newCash = parseFloat(deal.newCashCollected || "0");
     const existingCash = parseFloat(deal.existingCashCollected || "0");
     const closerComm = parseFloat(deal.closerCommission || "0");
-    
+
     stats.totalRevenue += dealAmount;
     stats.newCashCollected += newCash;
     stats.existingCashCollected += existingCash;
     stats.totalCashCollected += newCash + existingCash;
     stats.totalCloserCommission += closerComm;
     stats.dealCount++;
-    
+
     if (deal.showed) stats.showedCount++;
     if (deal.prepared) stats.preparedCount++;
     if (deal.closed) stats.closedCount++;
   }
-  
+
+  // Fold in imported historical data: sum each closer's imported numbers.
+  const closers = await getTeamMembers("closer");
+  for (const closer of closers) {
+    const imported = await aggregateImportedStatsForCloser(closer.id, year, month);
+    stats.totalRevenue += imported.totalRevenue;
+    stats.newCashCollected += imported.newCashCollected;
+    stats.existingCashCollected += imported.existingCashCollected;
+    stats.totalCashCollected += imported.totalCashCollected;
+    stats.totalCloserCommission += imported.closerCommission;
+    stats.dealCount += imported.dealCount;
+    stats.showedCount += imported.showedCount;
+    stats.preparedCount += imported.preparedCount;
+    stats.closedCount += imported.closedCount;
+  }
+
   return stats;
 }
 
@@ -625,7 +820,7 @@ export async function getAvailableMonths() {
   if (!db) throw new Error("Database not available");
   
   // EXTRACT(... FROM date) is the SQL-standard equivalent of MySQL's YEAR()/MONTH().
-  const result = await db.select({
+  const fromDeals = await db.select({
     year: sql<number>`EXTRACT(YEAR FROM ${deals.dealDate})::int`,
     month: sql<number>`EXTRACT(MONTH FROM ${deals.dealDate})::int`,
   })
@@ -633,13 +828,28 @@ export async function getAvailableMonths() {
   .groupBy(
     sql`EXTRACT(YEAR FROM ${deals.dealDate})`,
     sql`EXTRACT(MONTH FROM ${deals.dealDate})`,
-  )
-  .orderBy(
-    desc(sql`EXTRACT(YEAR FROM ${deals.dealDate})`),
-    desc(sql`EXTRACT(MONTH FROM ${deals.dealDate})`),
   );
-  
-  return result;
+
+  // Also include months that exist only in imported `dailyStats` data.
+  const fromStats = await db.select({
+    year: sql<number>`EXTRACT(YEAR FROM ${dailyStats.statDate})::int`,
+    month: sql<number>`EXTRACT(MONTH FROM ${dailyStats.statDate})::int`,
+  })
+  .from(dailyStats)
+  .groupBy(
+    sql`EXTRACT(YEAR FROM ${dailyStats.statDate})`,
+    sql`EXTRACT(MONTH FROM ${dailyStats.statDate})`,
+  );
+
+  // Merge + dedupe (year, month) and sort newest first.
+  const seen = new Set<string>();
+  const merged: { year: number; month: number }[] = [];
+  for (const row of [...fromDeals, ...fromStats]) {
+    const key = `${row.year}-${row.month}`;
+    if (!seen.has(key)) { seen.add(key); merged.push(row); }
+  }
+  merged.sort((a, b) => (b.year - a.year) || (b.month - a.month));
+  return merged;
 }
 
 // ==================== LEADERBOARD QUERIES ====================
@@ -1213,21 +1423,9 @@ export async function getPayrollSummaryForMonth(month: number, year: number): Pr
           totalOwed += parseFloat(deal.closerCommission?.toString() || "0");
         }
       }
-      // Plus subscription commissions (verified rows for this closer this month)
-      const verifiedSubs = await db.select({
-        commissionAmount: subscriptionVerifications.commissionAmount,
-      })
-        .from(subscriptionVerifications)
-        .innerJoin(subscriptions, eq(subscriptions.id, subscriptionVerifications.subscriptionId))
-        .where(and(
-          eq(subscriptions.closerId, member.id),
-          eq(subscriptionVerifications.month, month),
-          eq(subscriptionVerifications.year, year),
-          eq(subscriptionVerifications.isVerified, true),
-        ));
-      for (const v of verifiedSubs) {
-        totalOwed += parseFloat(v.commissionAmount?.toString() || "0");
-      }
+      // Plus imported historical commission (Steve / Jhalil 2026 spreadsheet).
+      const imported = await aggregateImportedStatsForCloser(member.id, year, month);
+      totalOwed += imported.closerCommission;
     } else if (member.role === "setter") {
       // Sum setter commissions on deals (already capped at $6K when stored)
       for (const deal of memberDeals) {
@@ -1800,6 +1998,21 @@ export async function getCompanyPerformance(year: number, month: number) {
     }
   }
 
+  // Fold in imported historical data (Steve + Jhalil 2026 spreadsheet).
+  // The dashboard shows the union of live + imported.
+  const closers = await getTeamMembers("closer");
+  for (const closer of closers) {
+    const imported = await aggregateImportedStatsForCloser(closer.id, year, month);
+    totalRevenue += imported.totalRevenue;
+    newCashCollected += imported.newCashCollected;
+    existingCashCollected += imported.existingCashCollected;
+    totalCashCollected += imported.totalCashCollected;
+    dealCount += imported.dealCount;
+    closedCount += imported.closedCount;
+    showedCount += imported.showedCount;
+    totalEntries += imported.dealCount;
+  }
+
   const totalMarketingCost = mktgCosts.reduce((sum, c) => sum + parseFloat(c.amount?.toString() || "0"), 0);
   const roas = totalMarketingCost > 0 ? totalCashCollected / totalMarketingCost : 0;
 
@@ -1845,10 +2058,6 @@ export async function getSalesTeamBreakdown(year: number, month: number) {
         closerCommission += parseFloat(deal.closerCommission || "0");
       }
 
-      // Get subscription commissions for this closer
-      const subCommissions = await getSubscriptionCommissionsByCloser(closer.id, year, month);
-      const subscriptionIncome = subCommissions.totalCommission;
-
       return {
         id: closer.id,
         name: closer.name,
@@ -1856,8 +2065,7 @@ export async function getSalesTeamBreakdown(year: number, month: number) {
         closedCount,
         totalRevenue,
         totalCashCollected,
-        commission: closerCommission + subscriptionIncome,
-        subscriptionIncome,
+        commission: closerCommission,
       };
     })
   );
@@ -1989,274 +2197,6 @@ export async function getPayrollOverview(year: number, month: number) {
 }
 
 
-// ==================== SUBSCRIPTION QUERIES ====================
-
-const SUBSCRIPTION_COMMISSION_RATE = 0.25; // 25% of monthly amount
-
-export async function createSubscription(sub: InsertSubscription): Promise<Subscription> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
-
-  const [newSub] = await db.insert(subscriptions).values(sub).returning();
-  return newSub;
-}
-
-export async function getActiveSubscriptions(): Promise<Subscription[]> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
-
-  return db.select().from(subscriptions)
-    .where(eq(subscriptions.active, true))
-    .orderBy(subscriptions.clientName);
-}
-
-export async function getAllSubscriptions(): Promise<Subscription[]> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
-
-  return db.select().from(subscriptions)
-    .orderBy(desc(subscriptions.active), subscriptions.clientName);
-}
-
-export async function getSubscriptionsByCloser(closerId: number): Promise<Subscription[]> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
-
-  return db.select().from(subscriptions)
-    .where(eq(subscriptions.closerId, closerId))
-    .orderBy(desc(subscriptions.active), subscriptions.clientName);
-}
-
-export async function cancelSubscription(id: number, reason?: string): Promise<Subscription | null> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
-
-  const now = new Date();
-  const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-  
-  await db.update(subscriptions).set({
-    active: false,
-    cancelledDate: dateStr,
-    cancelledReason: reason || null,
-  }).where(eq(subscriptions.id, id));
-
-  const [updated] = await db.select().from(subscriptions).where(eq(subscriptions.id, id));
-  return updated || null;
-}
-
-export async function reactivateSubscription(id: number): Promise<Subscription | null> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
-
-  await db.update(subscriptions).set({
-    active: true,
-    cancelledDate: null,
-    cancelledReason: null,
-  }).where(eq(subscriptions.id, id));
-
-  const [updated] = await db.select().from(subscriptions).where(eq(subscriptions.id, id));
-  return updated || null;
-}
-
-// ==================== SUBSCRIPTION VERIFICATION QUERIES ====================
-
-/**
- * Generate verification entries for all active subscriptions for a given month.
- * Only creates entries that don't already exist.
- */
-export async function generateMonthlyVerifications(year: number, month: number): Promise<SubscriptionVerification[]> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
-
-  const activeSubs = await getActiveSubscriptions();
-  
-  // Check which verifications already exist
-  const existing = await db.select().from(subscriptionVerifications)
-    .where(and(
-      eq(subscriptionVerifications.year, year),
-      eq(subscriptionVerifications.month, month)
-    ));
-
-  const existingSubIds = new Set(existing.map(v => v.subscriptionId));
-  
-  // Create verifications for subs that don't have one yet
-  const newVerifications: InsertSubscriptionVerification[] = [];
-  for (const sub of activeSubs) {
-    // Only generate if subscription started on or before this month
-    const subStartDate = sub.startYear * 12 + sub.startMonth;
-    const checkDate = year * 12 + month;
-    if (checkDate < subStartDate) continue;
-    
-    if (!existingSubIds.has(sub.id)) {
-      const commissionAmount = parseFloat(sub.monthlyAmount?.toString() || "0") * SUBSCRIPTION_COMMISSION_RATE;
-      newVerifications.push({
-        subscriptionId: sub.id,
-        month,
-        year,
-        isVerified: false,
-        isCancelled: false,
-        commissionAmount: commissionAmount.toFixed(2),
-      });
-    }
-  }
-
-  if (newVerifications.length > 0) {
-    await db.insert(subscriptionVerifications).values(newVerifications);
-  }
-
-  // Return all verifications for the month
-  return db.select().from(subscriptionVerifications)
-    .where(and(
-      eq(subscriptionVerifications.year, year),
-      eq(subscriptionVerifications.month, month)
-    ))
-    .orderBy(subscriptionVerifications.subscriptionId);
-}
-
-export async function getVerificationsByMonth(year: number, month: number): Promise<SubscriptionVerification[]> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
-
-  return db.select().from(subscriptionVerifications)
-    .where(and(
-      eq(subscriptionVerifications.year, year),
-      eq(subscriptionVerifications.month, month)
-    ))
-    .orderBy(subscriptionVerifications.subscriptionId);
-}
-
-export async function verifySubscription(verificationId: number, userId: number): Promise<SubscriptionVerification | null> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
-
-  await db.update(subscriptionVerifications).set({
-    isVerified: true,
-    isCancelled: false,
-    verifiedBy: userId,
-    verifiedAt: new Date(),
-  }).where(eq(subscriptionVerifications.id, verificationId));
-
-  const [updated] = await db.select().from(subscriptionVerifications).where(eq(subscriptionVerifications.id, verificationId));
-  return updated || null;
-}
-
-export async function unverifySubscription(verificationId: number): Promise<SubscriptionVerification | null> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
-
-  await db.update(subscriptionVerifications).set({
-    isVerified: false,
-    verifiedBy: null,
-    verifiedAt: null,
-  }).where(eq(subscriptionVerifications.id, verificationId));
-
-  const [updated] = await db.select().from(subscriptionVerifications).where(eq(subscriptionVerifications.id, verificationId));
-  return updated || null;
-}
-
-export async function markSubscriptionCancelled(verificationId: number, userId: number): Promise<{ verification: SubscriptionVerification | null; subscription: Subscription | null }> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
-
-  // Mark verification as cancelled
-  await db.update(subscriptionVerifications).set({
-    isCancelled: true,
-    isVerified: false,
-    verifiedBy: userId,
-    verifiedAt: new Date(),
-    commissionAmount: "0",
-  }).where(eq(subscriptionVerifications.id, verificationId));
-
-  const [verification] = await db.select().from(subscriptionVerifications).where(eq(subscriptionVerifications.id, verificationId));
-  
-  // Deactivate the subscription itself
-  let subscription: Subscription | null = null;
-  if (verification) {
-    subscription = await cancelSubscription(verification.subscriptionId, "Subscriber no longer in group");
-    
-    // Notify the closer
-    if (subscription) {
-      const closer = await getTeamMemberById(subscription.closerId);
-      if (closer) {
-        await db.insert(notifications).values({
-          recipientMemberId: subscription.closerId,
-          type: "deduction_added",
-          title: "Subscription Cancelled",
-          message: `${subscription.clientName}'s subscription ($${subscription.monthlyAmount}/mo) has been cancelled. They are no longer in the group.`,
-          amount: "0",
-        });
-      }
-    }
-  }
-
-  return { verification, subscription };
-}
-
-/**
- * Get subscription commission totals for a closer in a given month
- */
-export async function getSubscriptionCommissionsByCloser(closerId: number, year: number, month: number) {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
-
-  // Get all subscriptions for this closer
-  const closerSubs = await getSubscriptionsByCloser(closerId);
-  const subIds = closerSubs.map(s => s.id);
-  
-  if (subIds.length === 0) return { totalCommission: 0, verifiedCount: 0, pendingCount: 0, cancelledCount: 0, subscriptions: [] };
-
-  // Get verifications for the month
-  const allVerifications = await getVerificationsByMonth(year, month);
-  const closerVerifications = allVerifications.filter(v => subIds.includes(v.subscriptionId));
-
-  let totalCommission = 0;
-  let verifiedCount = 0;
-  let pendingCount = 0;
-  let cancelledCount = 0;
-
-  const subscriptionDetails = closerVerifications.map(v => {
-    const sub = closerSubs.find(s => s.id === v.subscriptionId);
-    const commission = v.isVerified ? parseFloat(v.commissionAmount?.toString() || "0") : 0;
-    if (v.isVerified) {
-      totalCommission += commission;
-      verifiedCount++;
-    } else if (v.isCancelled) {
-      cancelledCount++;
-    } else {
-      pendingCount++;
-    }
-    return {
-      subscriptionId: v.subscriptionId,
-      clientName: sub?.clientName || "Unknown",
-      monthlyAmount: parseFloat(sub?.monthlyAmount?.toString() || "0"),
-      commission,
-      isVerified: v.isVerified,
-      isCancelled: v.isCancelled,
-    };
-  });
-
-  return {
-    totalCommission,
-    verifiedCount,
-    pendingCount,
-    cancelledCount,
-    subscriptions: subscriptionDetails,
-  };
-}
-
-/**
- * Get random subscriptions for integrity audit
- */
-export async function getRandomSubscriptionsForAudit(count: number = 5): Promise<Subscription[]> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
-
-  const activeSubs = await getActiveSubscriptions();
-
-  // Shuffle and take `count`
-  const shuffled = activeSubs.sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, Math.min(count, shuffled.length));
-}
 
 // ==================== BOOKED CALLS QUERIES ====================
 //
@@ -2264,8 +2204,54 @@ export async function getRandomSubscriptionsForAudit(count: number = 5): Promise
 // agreed setters never see deal economics above $6K, both for display and
 // for commission calc. Don't bypass this cap without explicit approval.
 
+// Default cap for backward compatibility / unknown setters. Per-setter caps
+// live on `teamMembers.commissionCap` (NULL = uncapped, e.g. Jake the VSL setter).
 export const SETTER_CAP = 6000;
+// Default fallback rate when a setter has no `setterRate` set on their team
+// member row. Real rates are per-setter:
+//   - Text setter (Kresha / Call Setting motion): 0.03 (3%)
+//   - VSL setter (Jake / Pre Call motion):        0.02 (2%)
+// Setters NEVER take the in-house 9% haircut closers do — they always earn
+// their full rate on every collected payment.
 export const SETTER_RATE = 0.03;
+
+/**
+ * Resolve the commission cap to apply for a specific setter. Returns null
+ * if the setter is uncapped (e.g. Jake), or a positive number for a capped
+ * setter (e.g. Kresha at 6000). Falls back to the default SETTER_CAP if the
+ * teamMember row can't be found — defensive only.
+ */
+export async function getSetterCap(setterId: number): Promise<number | null> {
+  const db = await getDb();
+  if (!db) return SETTER_CAP;
+  const [row] = await db.select({ cap: teamMembers.commissionCap })
+    .from(teamMembers)
+    .where(eq(teamMembers.id, setterId));
+  if (!row) return SETTER_CAP;
+  if (row.cap === null || row.cap === undefined) return null; // explicitly uncapped
+  return parseFloat(row.cap.toString());
+}
+
+/**
+ * Resolve the commission rate (decimal: 0.03 = 3%) for a specific setter.
+ * Reads `teamMembers.setterRate`. Falls back to `SETTER_RATE` (3%) if the
+ * row exists but has no rate set (legacy data) or can't be found.
+ */
+export async function getSetterRate(setterId: number): Promise<number> {
+  const db = await getDb();
+  if (!db) return SETTER_RATE;
+  const [row] = await db.select({ rate: teamMembers.setterRate })
+    .from(teamMembers)
+    .where(eq(teamMembers.id, setterId));
+  if (!row || row.rate === null || row.rate === undefined) return SETTER_RATE;
+  return parseFloat(row.rate.toString());
+}
+
+/** Apply the per-setter cap to a cash amount. Pass cap=null for uncapped. */
+export function applySetterCap(cash: number, cap: number | null): number {
+  if (cap === null) return cash;
+  return Math.min(cash, cap);
+}
 
 export async function createBookedCall(input: InsertBookedCall): Promise<BookedCall> {
   const db = await getDb();
@@ -2322,26 +2308,29 @@ export async function deleteBookedCall(id: number): Promise<boolean> {
 }
 
 /**
- * Setter payouts for a given month: 3% of capped cash collected on closed
- * deals where deals.setterId matches.
+ * Setter payouts for a given month: capped cash collected × the setter's
+ * own rate (Kresha 3%, Jake 2%) on closed deals where deals.setterId matches.
  *
  * Returns the per-deal capped view (what the setter actually sees) plus the
- * monthly total commission. Deal client names and total deal amounts are
- * NOT returned — setters only see capped cash + their own commission.
+ * monthly total commission and the rate used. Deal client names and total
+ * deal amounts are NOT returned — setters only see capped cash + their own
+ * commission.
  */
 export type SetterPayoutLine = {
   dealId: number;
   dealDate: string;
   cappedCashCollected: number;  // min(actualCash, SETTER_CAP)
-  commission: number;            // cappedCashCollected * SETTER_RATE
+  commission: number;            // cappedCashCollected * setter's rate
 };
 
 export async function getSetterPayouts(
   setterId: number,
   year: number,
   month: number
-): Promise<{ lines: SetterPayoutLine[]; totalCommission: number }> {
+): Promise<{ lines: SetterPayoutLine[]; totalCommission: number; cap: number | null; rate: number }> {
   const dealsForMonth = await getDealsBySetter(setterId, year, month);
+  const cap = await getSetterCap(setterId);   // Kresha=6000, Jake=null
+  const rate = await getSetterRate(setterId); // Kresha=0.03, Jake=0.02
 
   const lines: SetterPayoutLine[] = dealsForMonth
     .filter(d => d.closed)
@@ -2349,17 +2338,17 @@ export async function getSetterPayouts(
       const cash =
         parseFloat(d.newCashCollected || "0") +
         parseFloat(d.existingCashCollected || "0");
-      const cappedCash = Math.min(cash, SETTER_CAP);
+      const eligibleCash = applySetterCap(cash, cap);
       return {
         dealId: d.id,
         dealDate: d.dealDate,
-        cappedCashCollected: cappedCash,
-        commission: cappedCash * SETTER_RATE,
+        cappedCashCollected: eligibleCash,
+        commission: eligibleCash * rate,
       };
     });
 
   const totalCommission = lines.reduce((sum, l) => sum + l.commission, 0);
-  return { lines, totalCommission };
+  return { lines, totalCommission, cap, rate };
 }
 
 // ==================== SALES TRACKER ====================
@@ -2568,4 +2557,1203 @@ export async function upsertDailyStat(input: InsertDailyStat): Promise<DailyStat
   }
   const [row] = await db.insert(dailyStats).values(input).returning();
   return row;
+}
+
+// ==================== VSL CALL PREPS ====================
+// Jake's pre-call discovery notes per the OCE Setter Script V1.
+
+export async function createVslCallPrep(input: InsertVslCallPrep): Promise<VslCallPrep> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const [row] = await db.insert(vslCallPreps).values(input).returning();
+  return row;
+}
+
+export async function getVslCallPrepById(id: number): Promise<VslCallPrep | null> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const [row] = await db.select().from(vslCallPreps).where(eq(vslCallPreps.id, id));
+  return row ?? null;
+}
+
+export async function getVslCallPrepsBySetter(setterId: number): Promise<VslCallPrep[]> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  return db.select().from(vslCallPreps)
+    .where(eq(vslCallPreps.setterId, setterId))
+    .orderBy(desc(vslCallPreps.createdAt));
+}
+
+export async function getVslCallPrepsByCloser(closerId: number): Promise<VslCallPrep[]> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  return db.select().from(vslCallPreps)
+    .where(eq(vslCallPreps.closerId, closerId))
+    .orderBy(desc(vslCallPreps.createdAt));
+}
+
+export async function getAllVslCallPreps(): Promise<VslCallPrep[]> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  return db.select().from(vslCallPreps)
+    .orderBy(desc(vslCallPreps.createdAt));
+}
+
+export async function updateVslCallPrep(
+  id: number,
+  patch: Partial<InsertVslCallPrep>,
+): Promise<VslCallPrep | null> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  await db.update(vslCallPreps).set(patch).where(eq(vslCallPreps.id, id));
+  return getVslCallPrepById(id);
+}
+
+export async function deleteVslCallPrep(id: number): Promise<boolean> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const result = await db.delete(vslCallPreps).where(eq(vslCallPreps.id, id));
+  return (result.rowCount ?? 0) > 0;
+}
+
+// ==================== DEAL ONBOARDING ====================
+//
+// One row per deal, lazy-created on first edit. The 90-day extension clock
+// (Phase 3) anchors to `onboardedAt` — once Ariana clicks "Mark fully
+// onboarded," the program timer starts.
+
+/** Fetch the onboarding row for a deal, or null if Ariana hasn't started it. */
+export async function getDealOnboarding(dealId: number): Promise<DealOnboarding | null> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const [row] = await db.select().from(dealOnboardings).where(eq(dealOnboardings.dealId, dealId));
+  return row ?? null;
+}
+
+/**
+ * Upsert a partial patch into the onboarding row for a deal. Lazy-creates the
+ * row on first call so callers don't need to seed it. Returns the full row.
+ */
+export async function upsertDealOnboarding(
+  dealId: number,
+  patch: Partial<Omit<InsertDealOnboarding, "id" | "dealId" | "createdAt" | "updatedAt">>
+): Promise<DealOnboarding> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const existing = await getDealOnboarding(dealId);
+  if (!existing) {
+    const [row] = await db.insert(dealOnboardings)
+      .values({ dealId, ...patch })
+      .returning();
+    return row;
+  }
+
+  await db.update(dealOnboardings)
+    .set(patch)
+    .where(eq(dealOnboardings.id, existing.id));
+  const refreshed = await getDealOnboarding(dealId);
+  if (!refreshed) throw new Error("Onboarding row vanished after update");
+  return refreshed;
+}
+
+/**
+ * Mark a deal's onboarding complete. Stamps onboardedAt + onboardedById.
+ * Returns the updated row. If onboarding hasn't been touched yet, this
+ * lazy-creates it so the timestamp still lands cleanly.
+ */
+export async function markDealOnboardingComplete(
+  dealId: number,
+  userId: number
+): Promise<DealOnboarding> {
+  return upsertDealOnboarding(dealId, {
+    onboardedAt: new Date(),
+    onboardedById: userId,
+  });
+}
+
+/**
+ * Reopen onboarding (un-stamp completion). Useful if Ariana marked complete
+ * by accident or the client paused. Doesn't touch the individual checkboxes.
+ */
+export async function reopenDealOnboarding(dealId: number): Promise<DealOnboarding | null> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const existing = await getDealOnboarding(dealId);
+  if (!existing) return null;
+  await db.update(dealOnboardings)
+    .set({ onboardedAt: null, onboardedById: null })
+    .where(eq(dealOnboardings.id, existing.id));
+  return getDealOnboarding(dealId);
+}
+
+/**
+ * Onboarding queue row — what Ariana sees in her list. We join deals (for
+ * client name + closer + DocuSign date) with the onboarding row (which may
+ * not exist yet for fresh DocuSign-signed deals).
+ */
+export type OnboardingQueueRow = {
+  dealId: number;
+  clientName: string;
+  dealDate: string;
+  totalDealAmount: number;
+  closerId: number;
+  closerName: string | null;
+  setterId: number | null;
+  docusignSigned: boolean;
+  // onboarding fields (null if no row yet)
+  onboardingId: number | null;
+  skoolAccessGranted: boolean;
+  paymentVerified: boolean;
+  introCallBooked: boolean;
+  coachAssignedPayeeId: number | null;
+  tradingLogAssigned: boolean;
+  weeklyCheckInSent: boolean;
+  onboardedAt: Date | null;
+  // computed: how many of the 6 checklist items are done
+  itemsDone: number;
+  itemsTotal: number;
+};
+
+const ONBOARDING_TOTAL_ITEMS = 6; // DocuSign + Skool + Payment + Sessions + TradingLog + CheckIn
+
+/** Compute how many checklist items are green. */
+function computeItemsDone(deal: { docusignSigned: boolean }, ob: DealOnboarding | null): number {
+  let done = 0;
+  if (deal.docusignSigned) done++;                                  // 1. DocuSign
+  if (ob?.skoolAccessGranted) done++;                               // 2. Skool
+  if (ob?.paymentVerified) done++;                                  // 3. Payment
+  if (ob?.introCallBooked) done++;                                  // 4. Intro call booked
+  if (ob?.tradingLogAssigned) done++;                               // 5. Trading log
+  if (ob?.weeklyCheckInSent) done++;                                // 6. Weekly check-in
+  return done;
+}
+
+/**
+ * The "pending" queue: every deal that's been DocuSigned but not yet fully
+ * onboarded. Sorted oldest-first so nothing rots at the back.
+ */
+export async function getPendingOnboardings(): Promise<OnboardingQueueRow[]> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  // Pull all DocuSign-signed deals + their onboarding row (LEFT JOIN since
+  // the onboarding row may not exist yet).
+  const rows = await db.select({
+    dealId: deals.id,
+    clientName: deals.clientName,
+    dealDate: deals.dealDate,
+    totalDealAmount: deals.totalDealAmount,
+    closerId: deals.closerId,
+    closerName: teamMembers.name,
+    setterId: deals.setterId,
+    docusignSigned: deals.docusignSigned,
+    ob: dealOnboardings,
+  })
+    .from(deals)
+    .leftJoin(teamMembers, eq(teamMembers.id, deals.closerId))
+    .leftJoin(dealOnboardings, eq(dealOnboardings.dealId, deals.id))
+    .where(and(eq(deals.docusignSigned, true), eq(deals.closed, true)));
+
+  return rows
+    .filter(r => !r.ob?.onboardedAt)  // pending = not yet completed
+    .map(r => {
+      const ob = r.ob;
+      return {
+        dealId: r.dealId,
+        clientName: r.clientName,
+        dealDate: r.dealDate,
+        totalDealAmount: parseFloat(r.totalDealAmount || "0"),
+        closerId: r.closerId,
+        closerName: r.closerName ?? null,
+        setterId: r.setterId,
+        docusignSigned: r.docusignSigned,
+        onboardingId: ob?.id ?? null,
+        skoolAccessGranted: ob?.skoolAccessGranted ?? false,
+        paymentVerified: ob?.paymentVerified ?? false,
+        introCallBooked: ob?.introCallBooked ?? false,
+        coachAssignedPayeeId: ob?.coachAssignedPayeeId ?? null,
+        tradingLogAssigned: ob?.tradingLogAssigned ?? false,
+        weeklyCheckInSent: ob?.weeklyCheckInSent ?? false,
+        onboardedAt: ob?.onboardedAt ?? null,
+        itemsDone: computeItemsDone(r, ob ?? null),
+        itemsTotal: ONBOARDING_TOTAL_ITEMS,
+      };
+    })
+    .sort((a, b) => a.dealDate.localeCompare(b.dealDate));  // oldest first
+}
+
+// ==================== UNIFIED CLIENT PROFILE ====================
+//
+// One fetch returns everything the /clients/:dealId page needs:
+//   - the deal itself (with closer + setter team rows resolved)
+//   - the onboarding row (may be null if Ariana hasn't started)
+//   - the assigned coach (payee row, if any)
+//   - all coaching sessions matched by clientName
+//   - payment plan progress (if applicable)
+//   - active coach options for Ariana's "assign coach" dropdown
+//
+// Any expensive sub-query is acceptable here — this page is read once per
+// client view, not in a tight loop.
+
+export type ClientProfile = {
+  deal: Deal;
+  closer: TeamMember | null;
+  setter: TeamMember | null;
+  onboarding: DealOnboarding | null;
+  assignedCoach: Payee | null;
+  coachOptions: Array<{ id: number; name: string }>;
+  coachingSessions: CoachingSession[];
+  paymentPlanProgress: {
+    totalMonths: number;
+    paymentsCompleted: number;
+    paymentsRemaining: number;
+    totalCollected: number;
+    totalRemaining: number;
+    isFullyPaid: boolean;
+  } | null;
+  // The login (if any) Ariana created for this client. Null until she clicks
+  // "Create Login" on the Client Profile.
+  clientUser: {
+    id: number;
+    email: string;
+    name: string | null;
+    lastSignedIn: Date | null;
+  } | null;
+};
+
+export async function getClientProfile(dealId: number): Promise<ClientProfile | null> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const deal = await getDealById(dealId);
+  if (!deal) return null;
+
+  // Resolve team rows in parallel
+  const [closer, setter, onboarding] = await Promise.all([
+    db.select().from(teamMembers).where(eq(teamMembers.id, deal.closerId)).then(rows => rows[0] ?? null),
+    deal.setterId
+      ? db.select().from(teamMembers).where(eq(teamMembers.id, deal.setterId)).then(rows => rows[0] ?? null)
+      : Promise.resolve(null),
+    getDealOnboarding(dealId),
+  ]);
+
+  // Coach options: any active payee of type "coach" or "on_demand_coach"
+  const coachPayees = await db.select().from(payees)
+    .where(and(eq(payees.active, true), sql`${payees.type} IN ('coach', 'on_demand_coach')`));
+  const coachOptions = coachPayees.map(p => ({ id: p.id, name: p.name }));
+
+  // Resolve assigned coach if onboarding has one set
+  const assignedCoach = onboarding?.coachAssignedPayeeId
+    ? coachPayees.find(p => p.id === onboarding.coachAssignedPayeeId) ?? null
+    : null;
+
+  // Coaching sessions for this client — matched by clientName (no FK link
+  // exists today; close enough until we normalize). Newest first.
+  const coachingSessionsList = await db.select().from(coachingSessions)
+    .where(eq(coachingSessions.clientName, deal.clientName))
+    .orderBy(desc(coachingSessions.sessionDate), desc(coachingSessions.id));
+
+  // Payment plan progress (if this is the parent of a plan, or a plan entry)
+  let paymentPlanProgress: ClientProfile["paymentPlanProgress"] = null;
+  if (deal.isPaymentPlan && !deal.parentDealId) {
+    paymentPlanProgress = await getPaymentPlanProgress(deal.id);
+  } else if (deal.parentDealId) {
+    paymentPlanProgress = await getPaymentPlanProgress(deal.parentDealId);
+  }
+
+  // Linked client login (if Ariana has created one)
+  const [clientRow] = await db.select({
+    id: users.id,
+    email: users.email,
+    name: users.name,
+    lastSignedIn: users.lastSignedIn,
+  })
+    .from(users)
+    .where(and(eq(users.clientDealId, deal.id), eq(users.role, "client")));
+
+  return {
+    deal,
+    closer,
+    setter,
+    onboarding,
+    assignedCoach,
+    coachOptions,
+    coachingSessions: coachingSessionsList,
+    paymentPlanProgress,
+    clientUser: clientRow ?? null,
+  };
+}
+
+/**
+ * Recently onboarded — last 30 days. Read-only reference for Ariana so she
+ * can find someone she just finished. Returns newest first.
+ */
+export async function getRecentlyOnboarded(): Promise<OnboardingQueueRow[]> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const thirtyDaysAgo = new Date();
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+  const rows = await db.select({
+    dealId: deals.id,
+    clientName: deals.clientName,
+    dealDate: deals.dealDate,
+    totalDealAmount: deals.totalDealAmount,
+    closerId: deals.closerId,
+    closerName: teamMembers.name,
+    setterId: deals.setterId,
+    docusignSigned: deals.docusignSigned,
+    ob: dealOnboardings,
+  })
+    .from(dealOnboardings)
+    .innerJoin(deals, eq(deals.id, dealOnboardings.dealId))
+    .leftJoin(teamMembers, eq(teamMembers.id, deals.closerId))
+    .where(sql`${dealOnboardings.onboardedAt} IS NOT NULL AND ${dealOnboardings.onboardedAt} > ${thirtyDaysAgo}`);
+
+  return rows
+    .map(r => {
+      const ob = r.ob!;
+      return {
+        dealId: r.dealId,
+        clientName: r.clientName,
+        dealDate: r.dealDate,
+        totalDealAmount: parseFloat(r.totalDealAmount || "0"),
+        closerId: r.closerId,
+        closerName: r.closerName ?? null,
+        setterId: r.setterId,
+        docusignSigned: r.docusignSigned,
+        onboardingId: ob.id,
+        skoolAccessGranted: ob.skoolAccessGranted,
+        paymentVerified: ob.paymentVerified,
+        introCallBooked: ob.introCallBooked,
+        coachAssignedPayeeId: ob.coachAssignedPayeeId,
+        tradingLogAssigned: ob.tradingLogAssigned,
+        weeklyCheckInSent: ob.weeklyCheckInSent,
+        onboardedAt: ob.onboardedAt,
+        itemsDone: computeItemsDone(r, ob),
+        itemsTotal: ONBOARDING_TOTAL_ITEMS,
+      };
+    })
+    .sort((a, b) => (b.onboardedAt?.getTime() ?? 0) - (a.onboardedAt?.getTime() ?? 0));
+}
+
+// ==================== EXTENSION REMINDERS (90-day) ====================
+//
+// Anchor: dealOnboardings.onboardedAt. Each milestone fires once per
+// (dealId, milestone, recipient). The cron is idempotent — running it 100
+// times in a day produces at most one row per recipient per milestone.
+//
+// Time math: we use calendar-day offsets, not exact 24×N hours, so a deal
+// onboarded at 11:30am on April 1 hits T-21 on the same wall-clock date in
+// June regardless of DST.
+
+export const PROGRAM_LENGTH_DAYS = 90;
+
+// Day-offset (relative to onboardedAt) at which each milestone fires.
+export const EXTENSION_MILESTONE_OFFSETS = {
+  window_open:    PROGRAM_LENGTH_DAYS - 21,  // 69
+  one_week_left:  PROGRAM_LENGTH_DAYS - 7,   // 83
+  program_ends:   PROGRAM_LENGTH_DAYS,       // 90
+  lapsed:         PROGRAM_LENGTH_DAYS + 7,   // 97
+} as const;
+
+export type ExtensionMilestone = keyof typeof EXTENSION_MILESTONE_OFFSETS;
+
+export const EXTENSION_MILESTONES: ExtensionMilestone[] = [
+  "window_open", "one_week_left", "program_ends", "lapsed",
+];
+
+/** Add `days` calendar days to a Date and return a fresh Date. */
+function addDays(d: Date, days: number): Date {
+  const x = new Date(d);
+  x.setDate(x.getDate() + days);
+  return x;
+}
+
+/** Calendar-day diff (today - then), positive when today is after. */
+export function daysSince(then: Date, now: Date = new Date()): number {
+  const a = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const b = new Date(then.getFullYear(), then.getMonth(), then.getDate()).getTime();
+  return Math.round((a - b) / (1000 * 60 * 60 * 24));
+}
+
+/**
+ * Compute the 90-day program timeline for a deal:
+ *   - daysSinceOnboarded: how many days have elapsed since the clock started
+ *   - daysRemaining:      90 - daysSince (negative when program is over)
+ *   - phase:              'pre_window' (T < -21), 'renewal_window' (T-21..T-7),
+ *                         'final_week' (T-7..T-0), 'ended_grace' (T-0..T+7),
+ *                         'lapsed' (T+7+)
+ * Returns null if the deal hasn't been onboarded yet.
+ */
+export type ProgramTimeline = {
+  onboardedAt: Date;
+  programEndsAt: Date;
+  daysSinceOnboarded: number;
+  daysRemaining: number;
+  phase: "pre_window" | "renewal_window" | "final_week" | "ended_grace" | "lapsed";
+};
+
+export function computeProgramTimeline(onboardedAt: Date | null): ProgramTimeline | null {
+  if (!onboardedAt) return null;
+  const programEndsAt = addDays(onboardedAt, PROGRAM_LENGTH_DAYS);
+  const days = daysSince(onboardedAt);
+  const remaining = PROGRAM_LENGTH_DAYS - days;
+  let phase: ProgramTimeline["phase"];
+  if (days < EXTENSION_MILESTONE_OFFSETS.window_open) phase = "pre_window";
+  else if (days < EXTENSION_MILESTONE_OFFSETS.one_week_left) phase = "renewal_window";
+  else if (days < EXTENSION_MILESTONE_OFFSETS.program_ends) phase = "final_week";
+  else if (days < EXTENSION_MILESTONE_OFFSETS.lapsed) phase = "ended_grace";
+  else phase = "lapsed";
+  return { onboardedAt, programEndsAt, daysSinceOnboarded: days, daysRemaining: remaining, phase };
+}
+
+/** All extension alerts ever fired for a deal, newest first. */
+export async function getExtensionAlertsForDeal(dealId: number): Promise<ExtensionAlert[]> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  return db.select().from(extensionAlerts)
+    .where(eq(extensionAlerts.dealId, dealId))
+    .orderBy(desc(extensionAlerts.firedAt));
+}
+
+/**
+ * Set the renewal pipeline status for a deal. Returns the updated row.
+ * Lazy-creates the onboarding row if missing (defensive — should already
+ * exist if there's a 90-day clock, but be safe).
+ */
+export async function setExtensionStatus(
+  dealId: number,
+  status: "window_open" | "outreach_started" | "call_booked" | "extended" | "lapsed",
+  userId: number,
+  notesPatch?: string,
+): Promise<DealOnboarding> {
+  const patch: Partial<InsertDealOnboarding> = {
+    extensionStatus: status,
+    extensionStatusAt: new Date(),
+    extensionStatusBy: userId,
+  };
+  if (notesPatch !== undefined) patch.extensionNotes = notesPatch;
+  return upsertDealOnboarding(dealId, patch);
+}
+
+/**
+ * Recipients for a deal's extension alerts:
+ *   - The closer (linked user, if any)
+ *   - All payroll users (Ariana et al.)
+ *   - All admin users (Vlad et al.)
+ * Deduplicated by user id.
+ */
+async function getExtensionRecipients(dealId: number): Promise<Array<{
+  userId: number; name: string; role: string;
+}>> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const deal = await getDealById(dealId);
+  if (!deal) return [];
+
+  // Closer's linked user
+  const closerLink = await db.select({ userId: userTeamLinks.userId })
+    .from(userTeamLinks)
+    .where(eq(userTeamLinks.teamMemberId, deal.closerId));
+  const closerUserIds = closerLink.map(r => r.userId);
+
+  // All payroll + admin users
+  const staff = await db.select({ id: users.id, name: users.name, role: users.role })
+    .from(users)
+    .where(sql`${users.role} IN ('payroll', 'admin')`);
+
+  const result = new Map<number, { userId: number; name: string; role: string }>();
+
+  // Add closer
+  if (closerUserIds.length > 0) {
+    const closerUsers = await db.select({ id: users.id, name: users.name, role: users.role })
+      .from(users)
+      .where(inArray(users.id, closerUserIds));
+    for (const u of closerUsers) {
+      result.set(u.id, { userId: u.id, name: u.name ?? "Closer", role: u.role });
+    }
+  }
+
+  // Add staff
+  for (const u of staff) {
+    if (!result.has(u.id)) {
+      result.set(u.id, { userId: u.id, name: u.name ?? "Staff", role: u.role });
+    }
+  }
+
+  return Array.from(result.values());
+}
+
+/**
+ * Scan all onboarded deals; for each, check whether today's calendar date
+ * has crossed any milestone. Fire one alert row per recipient per milestone
+ * IF a row doesn't already exist (idempotent).
+ *
+ * Also auto-advances the renewal pipeline status:
+ *   - On window_open milestone:  status null → 'window_open'
+ *   - On lapsed milestone:       status in {window_open, outreach_started, call_booked} → 'lapsed'
+ *
+ * Returns a summary of what fired.
+ */
+export type ExtensionRunResult = {
+  scannedDeals: number;
+  newAlerts: number;
+  byMilestone: Record<ExtensionMilestone, number>;
+  fired: Array<{ dealId: number; clientName: string; milestone: ExtensionMilestone; recipients: number }>;
+};
+
+export async function runExtensionReminders(): Promise<ExtensionRunResult> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  // All deals with completed onboarding (program clock running)
+  const onboardedRows = await db.select({
+    dealId: dealOnboardings.dealId,
+    onboardedAt: dealOnboardings.onboardedAt,
+    extensionStatus: dealOnboardings.extensionStatus,
+  })
+    .from(dealOnboardings)
+    .where(sql`${dealOnboardings.onboardedAt} IS NOT NULL`);
+
+  const result: ExtensionRunResult = {
+    scannedDeals: onboardedRows.length,
+    newAlerts: 0,
+    byMilestone: { window_open: 0, one_week_left: 0, program_ends: 0, lapsed: 0 },
+    fired: [],
+  };
+
+  for (const row of onboardedRows) {
+    if (!row.onboardedAt) continue;
+    const days = daysSince(row.onboardedAt);
+
+    // Determine which (if any) milestones are due as of today. We fire ALL
+    // milestones whose offset has been passed but which haven't been fired
+    // yet — so a deal that's been ignored for two weeks doesn't skip its
+    // window_open alert.
+    const dueMilestones: ExtensionMilestone[] = EXTENSION_MILESTONES.filter(
+      m => days >= EXTENSION_MILESTONE_OFFSETS[m]
+    );
+    if (dueMilestones.length === 0) continue;
+
+    // Existing alerts for this deal — used to skip already-fired pairs.
+    const existing = await db.select({
+      milestone: extensionAlerts.milestone,
+      recipientUserId: extensionAlerts.recipientUserId,
+    })
+      .from(extensionAlerts)
+      .where(eq(extensionAlerts.dealId, row.dealId));
+    const seen = new Set(existing.map(e => `${e.milestone}:${e.recipientUserId}`));
+
+    const recipients = await getExtensionRecipients(row.dealId);
+    if (recipients.length === 0) continue;
+
+    const deal = await getDealById(row.dealId);
+    if (!deal) continue;
+
+    for (const milestone of dueMilestones) {
+      const offset = EXTENSION_MILESTONE_OFFSETS[milestone];
+      const newRows: InsertExtensionAlert[] = [];
+      for (const r of recipients) {
+        if (seen.has(`${milestone}:${r.userId}`)) continue;
+        newRows.push({
+          dealId: row.dealId,
+          milestone,
+          recipientUserId: r.userId,
+          recipientName: r.name,
+          recipientRole: r.role,
+          dayOffset: offset,
+        });
+      }
+      if (newRows.length === 0) continue;
+
+      await db.insert(extensionAlerts).values(newRows);
+      result.newAlerts += newRows.length;
+      result.byMilestone[milestone] += newRows.length;
+      result.fired.push({
+        dealId: row.dealId,
+        clientName: deal.clientName,
+        milestone,
+        recipients: newRows.length,
+      });
+
+      // Auto-advance pipeline status on certain milestones
+      if (milestone === "window_open" && !row.extensionStatus) {
+        await db.update(dealOnboardings)
+          .set({ extensionStatus: "window_open", extensionStatusAt: new Date() })
+          .where(eq(dealOnboardings.dealId, row.dealId));
+      } else if (
+        milestone === "lapsed" &&
+        row.extensionStatus !== "extended" &&
+        row.extensionStatus !== "lapsed"
+      ) {
+        await db.update(dealOnboardings)
+          .set({ extensionStatus: "lapsed", extensionStatusAt: new Date() })
+          .where(eq(dealOnboardings.dealId, row.dealId));
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * "Coming up for 90 days" — what the closer dashboard surfaces. Returns
+ * deals onboarded by this closer that are within 30 days of their program
+ * ending OR up to 7 days past, sorted soonest-first.
+ *
+ * If `closerTeamMemberId` is null, returns nothing (we can't filter).
+ */
+export type ExtensionUpcomingRow = {
+  dealId: number;
+  clientName: string;
+  onboardedAt: Date;
+  daysSinceOnboarded: number;
+  daysRemaining: number;
+  phase: ProgramTimeline["phase"];
+  extensionStatus: "window_open" | "outreach_started" | "call_booked" | "extended" | "lapsed" | null;
+};
+
+export async function getUpcomingExtensions(
+  filter: { closerTeamMemberId?: number } = {}
+): Promise<ExtensionUpcomingRow[]> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const conds = [sql`${dealOnboardings.onboardedAt} IS NOT NULL`];
+  if (filter.closerTeamMemberId !== undefined) {
+    conds.push(eq(deals.closerId, filter.closerTeamMemberId));
+  }
+
+  const rows = await db.select({
+    dealId: dealOnboardings.dealId,
+    onboardedAt: dealOnboardings.onboardedAt,
+    extensionStatus: dealOnboardings.extensionStatus,
+    clientName: deals.clientName,
+  })
+    .from(dealOnboardings)
+    .innerJoin(deals, eq(deals.id, dealOnboardings.dealId))
+    .where(and(...conds));
+
+  const out: ExtensionUpcomingRow[] = [];
+  for (const r of rows) {
+    if (!r.onboardedAt) continue;
+    const t = computeProgramTimeline(r.onboardedAt);
+    if (!t) continue;
+    // Show window-open (T-21+) through grace (T+7). Already-extended clients
+    // drop off automatically. Lapsed status hangs around for visibility.
+    if (t.daysSinceOnboarded < EXTENSION_MILESTONE_OFFSETS.window_open) continue;
+    if (r.extensionStatus === "extended") continue;
+    out.push({
+      dealId: r.dealId,
+      clientName: r.clientName,
+      onboardedAt: r.onboardedAt,
+      daysSinceOnboarded: t.daysSinceOnboarded,
+      daysRemaining: t.daysRemaining,
+      phase: t.phase,
+      extensionStatus: r.extensionStatus,
+    });
+  }
+  // Soonest-ending first (smallest daysRemaining, then most-elapsed)
+  out.sort((a, b) => a.daysRemaining - b.daysRemaining);
+  return out;
+}
+
+// ==================== TRADING LOG ====================
+//
+// One log per client (lifetime). Mirrors the team's Google Sheet structure
+// but consolidated — clients add a row for every trade and the UI filters by
+// month/year. Ariana creates the log from the Client Profile; coaches view
+// read-only; the client edits their own.
+
+/**
+ * Compute the derived P/L fields for a trade row from raw inputs. Mirrors
+ * the Sheet formula 1:1 so existing client habits transfer cleanly:
+ *   bidAskDifference = bidPrice - askPrice
+ *   totalInvestment  = askPrice × 100 × contracts          (cost basis)
+ *   profitLoss       = bidAskDifference × 100 × contracts   (signed)
+ *   profitPct        = profitLoss / totalInvestment         (0.10 = 10%)
+ *
+ * The ×100 is the standard options multiplier (one contract = 100 shares).
+ */
+export function computeTradePL(input: {
+  askPrice: number;
+  bidPrice: number;
+  contractCount: number;
+}): {
+  bidAskDifference: number;
+  totalInvestment: number;
+  profitLoss: number;
+  profitPct: number;
+} {
+  const diff = input.bidPrice - input.askPrice;
+  const totalInvestment = input.askPrice * 100 * input.contractCount;
+  const profitLoss = diff * 100 * input.contractCount;
+  const profitPct = totalInvestment === 0 ? 0 : profitLoss / totalInvestment;
+  return {
+    bidAskDifference: diff,
+    totalInvestment,
+    profitLoss,
+    profitPct,
+  };
+}
+
+/** Create the trading log for a client (called by Ariana from Client Profile). */
+export async function createTradingLog(input: {
+  clientUserId: number;
+  dealId: number;
+  startingBalance: number;
+  brokerNote?: string | null;
+  createdById: number;
+}): Promise<TradingLog> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const [row] = await db.insert(tradingLogs).values({
+    clientUserId: input.clientUserId,
+    dealId: input.dealId,
+    startingBalance: input.startingBalance.toFixed(2),
+    brokerNote: input.brokerNote ?? null,
+    createdById: input.createdById,
+  }).returning();
+  return row;
+}
+
+export async function getTradingLogByClientUserId(clientUserId: number): Promise<TradingLog | null> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const [row] = await db.select().from(tradingLogs)
+    .where(eq(tradingLogs.clientUserId, clientUserId));
+  return row ?? null;
+}
+
+export async function getTradingLogByDealId(dealId: number): Promise<TradingLog | null> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const [row] = await db.select().from(tradingLogs)
+    .where(eq(tradingLogs.dealId, dealId));
+  return row ?? null;
+}
+
+export async function getTradingLogById(id: number): Promise<TradingLog | null> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const [row] = await db.select().from(tradingLogs).where(eq(tradingLogs.id, id));
+  return row ?? null;
+}
+
+/** Add a trade entry to a log. Computes P/L fields server-side. */
+export async function addTradeEntry(input: {
+  tradingLogId: number;
+  ticker: string;
+  strategy: "bounce_profit" | "ready_set_explode" | "paycheck_collector";
+  direction: "directional_bullish" | "directional_bearish";
+  result?: "win" | "loss" | null;
+  entryDate: string;
+  entryTime?: string | null;
+  exitDate?: string | null;
+  strikePrices?: string | null;
+  expirationDate?: string | null;
+  contractCount: number;
+  askPrice: number;
+  bidPrice: number;
+  notes?: string | null;
+}): Promise<TradeEntry> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const pl = computeTradePL({
+    askPrice: input.askPrice,
+    bidPrice: input.bidPrice,
+    contractCount: input.contractCount,
+  });
+  const [row] = await db.insert(tradeEntries).values({
+    tradingLogId: input.tradingLogId,
+    ticker: input.ticker.toUpperCase().trim(),
+    strategy: input.strategy,
+    direction: input.direction,
+    result: input.result ?? null,
+    entryDate: input.entryDate,
+    entryTime: input.entryTime ?? null,
+    exitDate: input.exitDate ?? null,
+    strikePrices: input.strikePrices ?? null,
+    expirationDate: input.expirationDate ?? null,
+    contractCount: input.contractCount,
+    askPrice: input.askPrice.toFixed(4),
+    bidPrice: input.bidPrice.toFixed(4),
+    bidAskDifference: pl.bidAskDifference.toFixed(4),
+    totalInvestment: pl.totalInvestment.toFixed(2),
+    profitLoss: pl.profitLoss.toFixed(2),
+    profitPct: pl.profitPct.toFixed(4),
+    notes: input.notes ?? null,
+  }).returning();
+  return row;
+}
+
+/** Patch a trade entry. Recomputes P/L if any of the price/contract fields change. */
+export async function updateTradeEntry(
+  entryId: number,
+  patch: Partial<{
+    ticker: string;
+    strategy: "bounce_profit" | "ready_set_explode" | "paycheck_collector";
+    direction: "directional_bullish" | "directional_bearish";
+    result: "win" | "loss" | null;
+    entryDate: string;
+    entryTime: string | null;
+    exitDate: string | null;
+    strikePrices: string | null;
+    expirationDate: string | null;
+    contractCount: number;
+    askPrice: number;
+    bidPrice: number;
+    notes: string | null;
+  }>
+): Promise<TradeEntry | null> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const [existing] = await db.select().from(tradeEntries).where(eq(tradeEntries.id, entryId));
+  if (!existing) return null;
+
+  // Stitch existing + patch for the P/L recompute
+  const ask = patch.askPrice ?? parseFloat(existing.askPrice);
+  const bid = patch.bidPrice ?? parseFloat(existing.bidPrice);
+  const contracts = patch.contractCount ?? existing.contractCount;
+  const pl = computeTradePL({ askPrice: ask, bidPrice: bid, contractCount: contracts });
+
+  const updateData: Record<string, unknown> = {
+    bidAskDifference: pl.bidAskDifference.toFixed(4),
+    totalInvestment: pl.totalInvestment.toFixed(2),
+    profitLoss: pl.profitLoss.toFixed(2),
+    profitPct: pl.profitPct.toFixed(4),
+  };
+
+  if (patch.ticker !== undefined) updateData.ticker = patch.ticker.toUpperCase().trim();
+  if (patch.strategy !== undefined) updateData.strategy = patch.strategy;
+  if (patch.direction !== undefined) updateData.direction = patch.direction;
+  if (patch.result !== undefined) updateData.result = patch.result;
+  if (patch.entryDate !== undefined) updateData.entryDate = patch.entryDate;
+  if (patch.entryTime !== undefined) updateData.entryTime = patch.entryTime;
+  if (patch.exitDate !== undefined) updateData.exitDate = patch.exitDate;
+  if (patch.strikePrices !== undefined) updateData.strikePrices = patch.strikePrices;
+  if (patch.expirationDate !== undefined) updateData.expirationDate = patch.expirationDate;
+  if (patch.contractCount !== undefined) updateData.contractCount = patch.contractCount;
+  if (patch.askPrice !== undefined) updateData.askPrice = patch.askPrice.toFixed(4);
+  if (patch.bidPrice !== undefined) updateData.bidPrice = patch.bidPrice.toFixed(4);
+  if (patch.notes !== undefined) updateData.notes = patch.notes;
+
+  await db.update(tradeEntries).set(updateData).where(eq(tradeEntries.id, entryId));
+  const [refreshed] = await db.select().from(tradeEntries).where(eq(tradeEntries.id, entryId));
+  return refreshed ?? null;
+}
+
+export async function deleteTradeEntry(entryId: number): Promise<boolean> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const result = await db.delete(tradeEntries).where(eq(tradeEntries.id, entryId));
+  return (result.rowCount ?? 0) > 0;
+}
+
+/** Fetch a single trade entry by id (used for auth checks before mutating). */
+export async function getTradeEntry(entryId: number): Promise<TradeEntry | null> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const [row] = await db.select().from(tradeEntries).where(eq(tradeEntries.id, entryId));
+  return row ?? null;
+}
+
+/** Update the log row itself (starting balance, broker note). Ariana / admin. */
+export async function updateTradingLog(
+  logId: number,
+  patch: { startingBalance?: number; brokerNote?: string | null }
+): Promise<TradingLog | null> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const updateData: Record<string, unknown> = {};
+  if (patch.startingBalance !== undefined) updateData.startingBalance = patch.startingBalance.toFixed(2);
+  if (patch.brokerNote !== undefined) updateData.brokerNote = patch.brokerNote;
+  if (Object.keys(updateData).length > 0) {
+    await db.update(tradingLogs).set(updateData).where(eq(tradingLogs.id, logId));
+  }
+  return getTradingLogById(logId);
+}
+
+/**
+ * List all entries for a log, optionally filtered to a single month. Newest
+ * first (entryDate desc, then id desc as tiebreaker).
+ */
+export async function getTradeEntriesForLog(
+  tradingLogId: number,
+  filter?: { year?: number; month?: number }
+): Promise<TradeEntry[]> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const conds = [eq(tradeEntries.tradingLogId, tradingLogId)];
+  if (filter?.year !== undefined && filter?.month !== undefined) {
+    const start = `${filter.year}-${String(filter.month).padStart(2, "0")}-01`;
+    // First day of next month
+    const nextYear = filter.month === 12 ? filter.year + 1 : filter.year;
+    const nextMonth = filter.month === 12 ? 1 : filter.month + 1;
+    const end = `${nextYear}-${String(nextMonth).padStart(2, "0")}-01`;
+    conds.push(sql`${tradeEntries.entryDate} >= ${start}`);
+    conds.push(sql`${tradeEntries.entryDate} < ${end}`);
+  }
+  return db.select().from(tradeEntries)
+    .where(and(...conds))
+    .orderBy(desc(tradeEntries.entryDate), desc(tradeEntries.id));
+}
+
+/**
+ * Headline stats for a trading log. Computed on the fly from the entries
+ * table — keeps the log row free of denormalized values that drift.
+ *
+ * Includes per-strategy breakdown so the dashboard can show which strategies
+ * are winning. Total P/L, win rate, current account balance, ROI.
+ */
+export type TradingLogStats = {
+  totalTrades: number;
+  closedTrades: number;     // result is set (win/loss)
+  wins: number;
+  losses: number;
+  winRatePct: number;       // 0..100
+  totalProfitLoss: number;
+  startingBalance: number;
+  currentBalance: number;
+  totalROI: number;         // ratio: 0.10 = 10%
+  byStrategy: Array<{
+    strategy: "bounce_profit" | "ready_set_explode" | "paycheck_collector";
+    trades: number;
+    wins: number;
+    losses: number;
+    winRatePct: number;
+    totalProfitLoss: number;
+  }>;
+};
+
+export async function getTradingLogStats(tradingLogId: number): Promise<TradingLogStats> {
+  const log = await getTradingLogById(tradingLogId);
+  if (!log) {
+    return {
+      totalTrades: 0, closedTrades: 0, wins: 0, losses: 0, winRatePct: 0,
+      totalProfitLoss: 0, startingBalance: 0, currentBalance: 0, totalROI: 0,
+      byStrategy: [],
+    };
+  }
+  const entries = await getTradeEntriesForLog(tradingLogId);
+  const startingBalance = parseFloat(log.startingBalance);
+
+  let wins = 0, losses = 0, totalPL = 0;
+  const byStrat = new Map<string, { trades: number; wins: number; losses: number; pl: number }>();
+  for (const e of entries) {
+    const pl = parseFloat(e.profitLoss);
+    totalPL += pl;
+    if (e.result === "win") wins++;
+    else if (e.result === "loss") losses++;
+
+    const k = e.strategy;
+    const prev = byStrat.get(k) ?? { trades: 0, wins: 0, losses: 0, pl: 0 };
+    prev.trades++;
+    prev.pl += pl;
+    if (e.result === "win") prev.wins++;
+    else if (e.result === "loss") prev.losses++;
+    byStrat.set(k, prev);
+  }
+  const closed = wins + losses;
+  return {
+    totalTrades: entries.length,
+    closedTrades: closed,
+    wins,
+    losses,
+    winRatePct: closed === 0 ? 0 : (wins / closed) * 100,
+    totalProfitLoss: totalPL,
+    startingBalance,
+    currentBalance: startingBalance + totalPL,
+    totalROI: startingBalance === 0 ? 0 : totalPL / startingBalance,
+    byStrategy: Array.from(byStrat.entries()).map(([strategy, v]) => ({
+      strategy: strategy as "bounce_profit" | "ready_set_explode" | "paycheck_collector",
+      trades: v.trades,
+      wins: v.wins,
+      losses: v.losses,
+      winRatePct: (v.wins + v.losses) === 0 ? 0 : (v.wins / (v.wins + v.losses)) * 100,
+      totalProfitLoss: v.pl,
+    })),
+  };
+}
+
+/** All trading logs whose deals have a coachAssignedPayeeId matching the given coach. */
+export async function getTradingLogsForCoach(coachPayeeId: number): Promise<Array<{
+  log: TradingLog;
+  clientName: string;
+  clientUserName: string | null;
+  stats: TradingLogStats;
+}>> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const rows = await db.select({
+    log: tradingLogs,
+    clientName: deals.clientName,
+    clientUserName: users.name,
+  })
+    .from(tradingLogs)
+    .innerJoin(deals, eq(deals.id, tradingLogs.dealId))
+    .innerJoin(dealOnboardings, eq(dealOnboardings.dealId, tradingLogs.dealId))
+    .leftJoin(users, eq(users.id, tradingLogs.clientUserId))
+    .where(eq(dealOnboardings.coachAssignedPayeeId, coachPayeeId));
+
+  const out = [];
+  for (const r of rows) {
+    out.push({
+      log: r.log,
+      clientName: r.clientName,
+      clientUserName: r.clientUserName,
+      stats: await getTradingLogStats(r.log.id),
+    });
+  }
+  return out;
+}
+
+// ==================== CLIENT DIRECTORY ====================
+//
+// Lightweight summary of every client in the system, for the /clients
+// directory page. One row per deal (NOT per client name — a client with two
+// deals appears twice, which is correct: each deal is a distinct program).
+
+export type ClientDirectoryRow = {
+  dealId: number;
+  clientName: string;
+  dealDate: string;
+  totalDealAmount: number;
+  closerName: string | null;
+  setterName: string | null;
+  docusignSigned: boolean;
+  onboardedAt: Date | null;
+  coachAssignedPayeeId: number | null;
+  coachName: string | null;
+  hasTradingLog: boolean;
+  tradeCount: number;
+  hasClientLogin: boolean;
+  lastSignedIn: Date | null;
+};
+
+export async function getClientDirectory(): Promise<ClientDirectoryRow[]> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const rows = await db.execute<{
+    dealId: number;
+    clientName: string;
+    dealDate: string;
+    totalDealAmount: string | null;
+    closerName: string | null;
+    setterName: string | null;
+    docusignSigned: boolean;
+    onboardedAt: Date | null;
+    coachAssignedPayeeId: number | null;
+    coachName: string | null;
+    hasTradingLog: boolean;
+    tradeCount: number;
+    hasClientLogin: boolean;
+    lastSignedIn: Date | null;
+  }>(sql`
+    SELECT
+      d.id                          AS "dealId",
+      d."clientName"                AS "clientName",
+      d."dealDate"::text            AS "dealDate",
+      d."totalDealAmount"           AS "totalDealAmount",
+      closer.name                   AS "closerName",
+      setter.name                   AS "setterName",
+      d."docusignSigned"            AS "docusignSigned",
+      ob."onboardedAt"              AS "onboardedAt",
+      ob."coachAssignedPayeeId"     AS "coachAssignedPayeeId",
+      coach.name                    AS "coachName",
+      (tl.id IS NOT NULL)           AS "hasTradingLog",
+      COALESCE(te_count.cnt, 0)::int AS "tradeCount",
+      (cu.id IS NOT NULL)           AS "hasClientLogin",
+      cu."lastSignedIn"             AS "lastSignedIn"
+    FROM deals d
+    LEFT JOIN "teamMembers" closer ON closer.id = d."closerId"
+    LEFT JOIN "teamMembers" setter ON setter.id = d."setterId"
+    LEFT JOIN "dealOnboardings" ob ON ob."dealId" = d.id
+    LEFT JOIN payees coach          ON coach.id = ob."coachAssignedPayeeId"
+    LEFT JOIN "tradingLogs" tl      ON tl."dealId" = d.id
+    LEFT JOIN (
+      SELECT "tradingLogId", COUNT(*)::int AS cnt FROM "tradeEntries" GROUP BY "tradingLogId"
+    ) te_count ON te_count."tradingLogId" = tl.id
+    LEFT JOIN users cu ON cu."clientDealId" = d.id AND cu.role = 'client'
+    WHERE d."closed" = true
+      AND (d."parentDealId" IS NULL)  -- exclude payment-plan child rows
+    ORDER BY d."dealDate" DESC, d.id DESC
+  `);
+
+  // drizzle-orm/node-postgres returns either an array OR an object with .rows.
+  // Normalize to the array shape so the rest of the app doesn't care.
+  const rowsArr = Array.isArray(rows) ? rows : (rows as { rows?: unknown[] }).rows ?? [];
+  return (rowsArr as ClientDirectoryRow[]).map(r => ({
+    dealId: r.dealId,
+    clientName: r.clientName,
+    dealDate: r.dealDate,
+    totalDealAmount: parseFloat((r.totalDealAmount as unknown as string) ?? "0") || 0,
+    closerName: r.closerName,
+    setterName: r.setterName,
+    docusignSigned: r.docusignSigned,
+    onboardedAt: r.onboardedAt,
+    coachAssignedPayeeId: r.coachAssignedPayeeId,
+    coachName: r.coachName,
+    hasTradingLog: r.hasTradingLog,
+    tradeCount: r.tradeCount,
+    hasClientLogin: r.hasClientLogin,
+    lastSignedIn: r.lastSignedIn,
+  }));
+}
+
+// ==================== MAGIC-LINK LOGIN TOKENS ====================
+
+const MAGIC_LINK_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+/** Create a new magic-link token row for a user. Returns the raw token. */
+export async function createLoginToken(input: {
+  userId: number;
+  reason?: string;
+  triggeredByUserId?: number | null;
+  ttlMs?: number;
+}): Promise<{ token: string; expiresAt: Date }> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const token = randomBytes(32).toString("base64url");
+  const expiresAt = new Date(Date.now() + (input.ttlMs ?? MAGIC_LINK_TTL_MS));
+  await db.insert(loginTokens).values({
+    token,
+    userId: input.userId,
+    expiresAt,
+    reason: input.reason ?? "login_request",
+    triggeredByUserId: input.triggeredByUserId ?? null,
+  });
+  return { token, expiresAt };
+}
+
+/**
+ * Look up a token, verify it's still usable, and mark it consumed. Returns
+ * the user record on success or null on any failure (expired / used /
+ * unknown token / user gone).
+ */
+export async function consumeLoginToken(
+  token: string,
+): Promise<NonNullable<Awaited<ReturnType<typeof getUserById>>> | null> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const [row] = await db.select().from(loginTokens).where(eq(loginTokens.token, token));
+  if (!row) return null;
+  if (row.usedAt) return null;
+  if (row.expiresAt.getTime() < Date.now()) return null;
+
+  // Mark consumed first so a concurrent click doesn't double-issue.
+  await db.update(loginTokens)
+    .set({ usedAt: new Date() })
+    .where(eq(loginTokens.id, row.id));
+
+  const user = await getUserById(row.userId);
+  return user ?? null;
 }

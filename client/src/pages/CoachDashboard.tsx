@@ -10,7 +10,8 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
 import { format } from "date-fns";
-import { ChevronLeft, ChevronRight, Clock, DollarSign, AlertTriangle, Plus, Trash2, CheckCircle, XCircle, Link2, Briefcase, CalendarCheck } from "lucide-react";
+import { ChevronLeft, ChevronRight, Clock, DollarSign, AlertTriangle, Plus, Trash2, CheckCircle, XCircle, Link2, Briefcase, CalendarCheck, TrendingUp, TrendingDown } from "lucide-react";
+import { Link } from "wouter";
 
 const MONTHLY_CAP = 2000;
 
@@ -163,6 +164,10 @@ export default function CoachDashboard() {
           </div>
         </div>
       </div>
+
+      {/* My Clients' Trading Logs — for coaches assigned to clients via
+          dealOnboardings.coachAssignedPayeeId. Auto-hides if none. */}
+      <MyClientsTradingLogs />
 
       {/* Summary Cards - Different for salaried vs on-demand */}
       {isSalaried ? (
@@ -613,5 +618,75 @@ export default function CoachDashboard() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+// ─── My Clients' Trading Logs ───────────────────────────────────────────
+//
+// Surfaces every client this coach is assigned to (via
+// dealOnboardings.coachAssignedPayeeId). Each card shows headline stats and
+// links to the unified Client Profile, which now renders the trading log
+// inline read-only.
+
+function MyClientsTradingLogs() {
+  const q = trpc.tradingLog.listForMyCoach.useQuery();
+  const rows = q.data ?? [];
+
+  if (q.isLoading || rows.length === 0) return null;
+
+  return (
+    <Card className="bg-zinc-900 border-zinc-800">
+      <CardHeader>
+        <CardTitle className="flex items-center justify-between text-lg text-white">
+          <span className="flex items-center gap-2">
+            <TrendingUp className="h-5 w-5 text-[#c7ab77]" />
+            My Clients' Trading Logs
+          </span>
+          <Badge className="bg-[#c7ab77]/15 text-[#c7ab77] border-0 hover:bg-[#c7ab77]/20">
+            {rows.length}
+          </Badge>
+        </CardTitle>
+        <p className="text-xs text-zinc-400">
+          Review your clients' trades each week. Click a card to open their full profile.
+        </p>
+      </CardHeader>
+      <CardContent>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          {rows.map(r => (
+            <Link key={r.log.id} href={`/clients/${r.log.dealId}`}>
+              <a className="block p-4 rounded-lg border border-zinc-800 bg-zinc-950 hover:border-[#c7ab77]/40 transition-colors cursor-pointer">
+                <div className="flex items-center justify-between mb-2">
+                  <p className="font-semibold text-white truncate">{r.clientName}</p>
+                  {r.stats.totalProfitLoss >= 0 ? (
+                    <TrendingUp className="h-4 w-4 text-green-400 shrink-0" />
+                  ) : (
+                    <TrendingDown className="h-4 w-4 text-red-400 shrink-0" />
+                  )}
+                </div>
+                <div className="grid grid-cols-3 gap-2 text-xs">
+                  <div>
+                    <p className="text-zinc-500 uppercase tracking-wider">Trades</p>
+                    <p className="text-white font-bold mt-0.5">{r.stats.totalTrades}</p>
+                  </div>
+                  <div>
+                    <p className="text-zinc-500 uppercase tracking-wider">Win rate</p>
+                    <p className="text-white font-bold mt-0.5">
+                      {r.stats.closedTrades > 0 ? `${r.stats.winRatePct.toFixed(0)}%` : "—"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-zinc-500 uppercase tracking-wider">P/L</p>
+                    <p className={`font-bold mt-0.5 ${r.stats.totalProfitLoss >= 0 ? "text-green-400" : "text-red-400"}`}>
+                      {r.stats.totalProfitLoss >= 0 ? "+" : ""}
+                      ${r.stats.totalProfitLoss.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                    </p>
+                  </div>
+                </div>
+              </a>
+            </Link>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
   );
 }

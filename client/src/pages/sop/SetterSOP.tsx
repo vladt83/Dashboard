@@ -13,10 +13,44 @@ export default function SetterSOP() {
       <SOPHeader
         icon={PhoneIncoming}
         role="Setter"
-        who="Kresha Koirala"
+        who="Kresha Koirala (Call Setting · 3%) · Jake Glass (Pre Call · 2%)"
         color="text-blue-400"
-        mission="Book qualified calls from text outreach and assign each to the right closer. Every call you book is one shot at a one-time sale — and 3% of each one you generate is yours. (Subscriptions don't pay setter commission.)"
+        mission="Setters fill the closer's calendar with qualified, prepared prospects. Every call you set is one shot at a sale — and your commission lane (2% Pre Call · 3% Call Setting) earns on every closed deal you're attributed to."
       />
+
+      {/* Two flavors of setter — explain which you are */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Two lanes of setter at TF</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="rounded-lg border border-blue-500/30 bg-blue-500/5 p-4">
+              <p className="text-xs uppercase tracking-wider text-blue-400 font-bold mb-2">
+                Call Setting · Kresha (3%)
+              </p>
+              <p className="text-sm text-foreground/90">
+                Sets calls from text outreach. Logs each call with client
+                name, phone, and assigned closer. Tabs: <span className="text-foreground font-medium">Call Setting</span> + <span className="text-foreground font-medium">My Bookings</span>.
+              </p>
+            </div>
+            <div className="rounded-lg border border-purple-500/30 bg-purple-500/5 p-4">
+              <p className="text-xs uppercase tracking-wider text-purple-400 font-bold mb-2">
+                Pre Call · Jake (2%)
+              </p>
+              <p className="text-sm text-foreground/90">
+                Calls every prospect within 5 minutes of their VSL booking.
+                Runs the 5-question script, captures answers, and{" "}
+                <span className="text-foreground font-medium">mentions</span>{" "}
+                the Stock Predator show-up incentive — the closer presents
+                the course access on the next call. Tabs:{" "}
+                <span className="text-foreground font-medium">Pre Call</span>{" "}
+                + <span className="text-foreground font-medium">My Preps</span>.
+              </p>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* What this dashboard looks like overview */}
       <Card>
@@ -28,17 +62,20 @@ export default function SetterSOP() {
         </CardHeader>
         <CardContent>
           <p className="text-sm text-muted-foreground mb-4">
-            When you log in, you land here. Three tabs across the top —{" "}
-            <span className="text-foreground font-medium">Book Call</span>,{" "}
+            When you log in, you land on the lane that matches you. Call Setters
+            see three tabs — <span className="text-foreground font-medium">Call Setting</span>,{" "}
             <span className="text-foreground font-medium">My Bookings</span>, and{" "}
             <span className="text-foreground font-medium">My Payouts</span>.
-            Pick the tab for whatever you're doing right now.
+            Pre Call setters see <span className="text-foreground font-medium">Pre Call</span>,{" "}
+            <span className="text-foreground font-medium">My Preps</span>, and{" "}
+            <span className="text-foreground font-medium">My Payouts</span>. The
+            other lane's tabs are hidden so you don't accidentally use the wrong one.
           </p>
-          <MockScreen title="Setter Dashboard" subtitle="Top of the page after login">
+          <MockScreen title="Setter Dashboard" subtitle="Top of the page after login (Call Setting lane shown)">
             <div className="flex gap-1.5 p-1 bg-secondary/40 rounded-md w-fit">
               <span className="px-3 py-1.5 rounded text-xs bg-background text-foreground font-medium flex items-center gap-1.5">
                 <PhoneIncoming className="h-3 w-3" />
-                Book Call
+                Call Setting
               </span>
               <span className="px-3 py-1.5 rounded text-xs text-muted-foreground flex items-center gap-1.5">
                 <ListChecks className="h-3 w-3" />
@@ -59,7 +96,7 @@ export default function SetterSOP() {
         </CardHeader>
         <CardContent className="px-6">
 
-          <Step n={1} title="Open the “Book Call” tab and fill the form">
+          <Step n={1} title="Open the “Call Setting” tab and fill the form">
             <p>
               When a lead from your texting outreach agrees to a call, capture
               their info immediately. Don't wait until end of day — names get
@@ -67,7 +104,7 @@ export default function SetterSOP() {
               <em>before</em> they pick up the phone.
             </p>
 
-            <MockScreen title="Book a New Call" subtitle="Setter Dashboard → Book Call tab">
+            <MockScreen title="Set a New Call" subtitle="Setter Dashboard → Call Setting tab">
               <div className="grid grid-cols-2 gap-3">
                 <MockField label="Client First Name" value="Marcus" callout={1} />
                 <MockField label="Client Last Name" value="Johnson" callout={2} />
@@ -76,7 +113,7 @@ export default function SetterSOP() {
               </div>
               <MockField label="Notes (optional)" value="Lead from yesterday's text blast — wants to hear about the small-account program. Available after 2pm EST." />
               <div className="flex justify-end pt-1">
-                <MockButton label="Book Call" callout={5} />
+                <MockButton label="Set Call" callout={5} />
               </div>
             </MockScreen>
 
@@ -85,7 +122,7 @@ export default function SetterSOP() {
               { n: 2, text: <><span className="font-medium text-foreground">Last name.</span> Required. We use first+last to match a deal back to your booking when commission is calculated.</> },
               { n: 3, text: <><span className="font-medium text-foreground">Phone number.</span> Required. Critical — the closer needs this to actually call them. Type it however the client gave it to you; the system stores it as-is.</> },
               { n: 4, text: <><span className="font-medium text-foreground">Assigned Closer.</span> The big one. Pick which closer is taking this call. Use the rotation/assignment rules Vlad gives you.</> },
-              { n: 5, text: <><span className="font-medium text-foreground">Book Call.</span> Click it. The booking is now logged — visible to you, that closer, and admin.</> },
+              { n: 5, text: <><span className="font-medium text-foreground">Set Call.</span> Click it. The call is now logged — visible to you, that closer, and admin.</> },
             ]} />
 
             <Why>
@@ -93,12 +130,12 @@ export default function SetterSOP() {
               closer's "Setter Bookings" tab pulls directly from what you
               enter here — if you skip a field, they walk into the call blind.
               And come payout time, the system attributes commission to whichever
-              setter booked the deal that closed.
+              setter set the deal that closed.
             </Why>
 
             <Warning>
               If you're not sure which closer to assign, ask Vlad before
-              clicking "Book Call." Re-assigning later is possible but messy —
+              clicking "Set Call." Re-assigning later is possible but messy —
               better to get it right the first time.
             </Warning>
           </Step>
@@ -131,38 +168,34 @@ export default function SetterSOP() {
 
           <Step n={3} title="Watch “My Payouts” for your commission">
             <p>
-              When a closer marks a <span className="text-foreground font-medium">one-time sale</span> closed
-              and selects you as the setter, you earn 3% of the cash collected
-              — up to a $6,000 cap per deal. That commission shows up here under
-              the month the deal closed.
+              When a closer marks a deal closed and selects you as the setter,
+              you earn your lane's rate of the cash collected —{" "}
+              <span className="text-foreground font-medium">3% if you're on the Call Setting lane</span>,{" "}
+              <span className="text-foreground font-medium">2% if you're on the Pre Call lane</span>.
+              That commission shows up here under the month the deal closed.
+              Commission only releases once DocuSign is signed.
             </p>
 
-            <Warning>
-              <span className="font-semibold">Subscriptions do not pay setter commission.</span>{" "}
-              The closer earns 25% recurring on subscriptions, but you don't.
-              Your 3% applies only to one-time sales / deals.
-            </Warning>
-
-            <MockScreen title="My Payouts" subtitle="Setter Dashboard → My Payouts tab" badge="April 2026">
+            <MockScreen title="My Payouts" subtitle="Setter Dashboard → My Payouts tab (Call Setting lane example)" badge="April 2026">
               <div className="grid grid-cols-3 gap-3">
                 <SummaryStat label="Closed Deals" value="3" />
-                <SummaryStat label="Rate" value="3%" sub="capped $6K cash / deal" />
-                <SummaryStat label="Total Commission" value="$540.00" tone="primary" />
+                <SummaryStat label="Rate" value="3%" sub="of cash collected per deal" />
+                <SummaryStat label="Total Commission" value="$405.00" tone="primary" />
               </div>
               <MockTable
-                headers={["Deal Date", "Cash Collected (capped)", "Your Commission (3%)"]}
+                headers={["Deal Date", "Cash Collected", "Your Commission (3%)"]}
                 rows={[
-                  ["2026-04-12", "$6,000.00", { value: "$180.00", tone: "primary", bold: true }],
-                  ["2026-04-19", "$6,000.00", { value: "$180.00", tone: "primary", bold: true }],
-                  ["2026-04-23", "$6,000.00", { value: "$180.00", tone: "primary", bold: true }],
+                  ["2026-04-12", "$4,500.00", { value: "$135.00", tone: "primary", bold: true }],
+                  ["2026-04-19", "$5,200.00", { value: "$156.00", tone: "primary", bold: true }],
+                  ["2026-04-23", "$3,800.00", { value: "$114.00", tone: "primary", bold: true }],
                 ]}
               />
             </MockScreen>
 
             <Why>
-              The cash column is intentionally capped at $6,000 — even if
-              the actual deal was $20K. Your commission is calculated on the
-              capped amount. This protects deal economics; it isn't a glitch.
+              Numbers update live as closers mark deals closed and attribute
+              you. There's no waiting on a manual report — the moment a closer
+              picks your name on a deal, your payouts page reflects it.
             </Why>
 
             <Tip>
@@ -174,15 +207,16 @@ export default function SetterSOP() {
           <Step n={4} title="Get paid">
             <p>
               At the end of each pay period, Ariana reviews payouts in the
-              Payroll Dashboard. Your 3% on each closed deal is automatically
-              calculated — you don't need to submit anything separately.
-              Your "My Payouts" total = what you'll be paid.
+              Payroll Dashboard. Your lane rate (3% Call Setting · 2% Pre Call)
+              on each closed deal is automatically calculated — you don't need
+              to submit anything separately. Your "My Payouts" total = what
+              you'll be paid.
             </p>
 
             <Tip>
               If a deal you sourced doesn't show up in your payouts, it's
-              because the closer didn't pick you in the setter dropdown. Tell
-              Vlad — he can edit the deal to attribute it correctly.
+              because the closer didn't pick you in the setter dropdown — or
+              DocuSign isn't signed yet. Tell Vlad — he can fix the attribution.
             </Tip>
           </Step>
 
@@ -200,42 +234,43 @@ export default function SetterSOP() {
         <CardContent className="space-y-4">
           <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 font-mono text-sm">
             <p className="text-muted-foreground text-xs uppercase tracking-wider mb-2">
-              The formula
+              The formula (depends on your lane)
             </p>
             <p>
               <span className="text-primary">your commission</span> ={" "}
-              <span className="text-amber-400">min</span>(deal cash collected,{" "}
-              <span className="text-amber-400">$6,000</span>) × <span className="text-primary">3%</span>
+              cash collected on the deal × <span className="text-primary">your lane rate</span>
+            </p>
+            <p className="text-xs text-muted-foreground mt-2">
+              Call Setting (Kresha): 3% · Pre Call (Jake): 2% · cap applies on Call Setting only.
             </p>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             <ExampleCard
-              label="Small deal"
-              cash="$2,000"
-              capped="$2,000"
-              commission="$60.00"
+              label="Small deal · Call Setting (3%)"
+              cash="$2,500"
+              commission="$75.00"
+              rate="3%"
             />
             <ExampleCard
-              label="At the cap"
-              cash="$6,000"
-              capped="$6,000"
-              commission="$180.00"
+              label="Mid-size · Call Setting (3%)"
+              cash="$5,000"
+              commission="$150.00"
+              rate="3%"
+            />
+            <ExampleCard
+              label="Bigger deal · Pre Call (2%)"
+              cash="$8,000"
+              commission="$160.00"
+              rate="2%"
               hot
-            />
-            <ExampleCard
-              label="Big deal — still capped"
-              cash="$20,000"
-              capped="$6,000"
-              commission="$180.00"
             />
           </div>
 
           <Why>
-            The cap means: a setter and closer working together each
-            see "fair share" for their role without the setter knowing
-            the full size of the deal. It also means you're paid the same
-            on a $6K deal and a $20K deal — focus on volume, not deal size.
+            Focus on volume. More closed deals = more commission, full stop.
+            Your job is to fill the calendar with qualified calls; the closer's
+            job is to convert them. Each role gets paid for what they brought.
           </Why>
         </CardContent>
       </Card>
@@ -251,13 +286,12 @@ export default function SetterSOP() {
         <CardContent>
           <DoDont
             dos={[
-              "See every booking you've made — names, phones, assigned closer.",
-              "See your own commission per deal (capped cash + your 3%).",
-              "Edit your own bookings if you typoed something.",
+              "See every call you've set or pre-called — names, phones, assigned closer.",
+              "See your own commission per deal (cash collected × your lane rate, capped if you're on Call Setting).",
+              "Edit your own bookings or pre-call notes if you typoed something.",
             ]}
             donts={[
-              "Cannot see the actual deal totals above $6,000 (intentional).",
-              "Cannot see other setters' bookings or payouts.",
+              "Cannot see other setters' bookings, preps, or payouts.",
               "Cannot see the closer's commission on the deal you sourced.",
               "Cannot edit a deal directly — only the closer or admin can.",
             ]}
@@ -273,18 +307,22 @@ export default function SetterSOP() {
           <ol className="space-y-2 text-sm">
             <li className="flex gap-3">
               <span className="text-primary font-bold">1.</span>
-              <span>Lead says yes to a call → open <span className="text-foreground font-medium">Book Call</span> → fill form → click <span className="text-foreground font-medium">Book Call</span>.</span>
+              <span><strong>Call Setting lane:</strong> lead says yes → <span className="text-foreground font-medium">Call Setting</span> tab → fill form → <span className="text-foreground font-medium">Set Call</span>.</span>
             </li>
             <li className="flex gap-3">
               <span className="text-primary font-bold">2.</span>
-              <span>Need to look up a past booking? → <span className="text-foreground font-medium">My Bookings</span> tab.</span>
+              <span><strong>Pre Call lane:</strong> right after every 5–8 min discovery → <span className="text-foreground font-medium">Pre Call</span> tab → fill the 5 questions → <span className="text-foreground font-medium">Save Pre Call</span>.</span>
             </li>
             <li className="flex gap-3">
               <span className="text-primary font-bold">3.</span>
-              <span>Want to know what you earned this month? → <span className="text-foreground font-medium">My Payouts</span> tab.</span>
+              <span>Need to look up a past one? → <span className="text-foreground font-medium">My Bookings</span> (Call Setting) or <span className="text-foreground font-medium">My Preps</span> (Pre Call).</span>
             </li>
             <li className="flex gap-3">
               <span className="text-primary font-bold">4.</span>
+              <span>Want to know what you earned this month? → <span className="text-foreground font-medium">My Payouts</span> tab.</span>
+            </li>
+            <li className="flex gap-3">
+              <span className="text-primary font-bold">5.</span>
               <span>Closer didn't pick you on a deal you sourced? → tell Vlad.</span>
             </li>
           </ol>
@@ -321,14 +359,14 @@ function SummaryStat({
 function ExampleCard({
   label,
   cash,
-  capped,
   commission,
+  rate,
   hot,
 }: {
   label: string;
   cash: string;
-  capped: string;
   commission: string;
+  rate?: string;
   hot?: boolean;
 }) {
   return (
@@ -336,15 +374,11 @@ function ExampleCard({
       <p className="text-xs uppercase tracking-wider text-muted-foreground">{label}</p>
       <div className="mt-2 space-y-1 text-sm">
         <div className="flex justify-between">
-          <span className="text-muted-foreground">Actual cash:</span>
+          <span className="text-muted-foreground">Cash collected:</span>
           <span>{cash}</span>
         </div>
-        <div className="flex justify-between">
-          <span className="text-muted-foreground">After cap:</span>
-          <span>{capped}</span>
-        </div>
         <div className="flex justify-between font-semibold pt-1.5 border-t border-border/30">
-          <span>Your 3%:</span>
+          <span>Your {rate ?? "3%"}:</span>
           <span className="text-primary">{commission}</span>
         </div>
       </div>

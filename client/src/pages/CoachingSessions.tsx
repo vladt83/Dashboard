@@ -162,12 +162,18 @@ export default function CoachingSessions() {
     }
   };
 
-  const completedSessions = sessions?.filter((s: any) => !s.isNoShow) || [];
-  const noShowSessions = sessions?.filter((s: any) => s.isNoShow) || [];
+  // Filter to the selected coach. Without this the admin view used to roll
+  // every coach's sessions into the same totals — confusing.
+  const sessionsForCoach = sessions?.filter((s: any) => s.coachPayeeId === activeCoachId) || [];
+  const completedSessions = sessionsForCoach.filter((s: any) => !s.isNoShow);
+  const noShowSessions = sessionsForCoach.filter((s: any) => s.isNoShow);
 
+  // Pay rates only apply to on-demand coaches; salaried coaches always show $0.
+  const activeCoach = coachPayees.find((c: any) => c.id === activeCoachId);
+  const isOnDemand = activeCoach?.type === "on_demand_coach";
   const totalMinutes = completedSessions.reduce((sum: number, s: any) => sum + s.minutes, 0);
-  const sessionPay = totalMinutes * RATE_PER_MINUTE;
-  const noShowPay = noShowSessions.length * NO_SHOW_RATE;
+  const sessionPay = isOnDemand ? totalMinutes * RATE_PER_MINUTE : 0;
+  const noShowPay = isOnDemand ? noShowSessions.length * NO_SHOW_RATE : 0;
   const totalPay = sessionPay + noShowPay;
 
   return (
@@ -189,17 +195,39 @@ export default function CoachingSessions() {
         </Button>
       </div>
 
-      {/* Month Navigation */}
-      <div className="flex items-center justify-center gap-4">
-        <Button variant="outline" size="icon" onClick={prevMonth}>
-          <ChevronLeft className="h-4 w-4" />
-        </Button>
-        <h2 className="text-lg font-semibold min-w-[200px] text-center">
-          {MONTHS[selectedMonth - 1]} {selectedYear}
-        </h2>
-        <Button variant="outline" size="icon" onClick={nextMonth}>
-          <ChevronRight className="h-4 w-4" />
-        </Button>
+      {/* Coach + Month Navigation */}
+      <div className="flex flex-col md:flex-row items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-muted-foreground">Coach:</span>
+          <Select
+            value={activeCoachId ? String(activeCoachId) : ""}
+            onValueChange={(v) => setSelectedCoachId(parseInt(v))}
+          >
+            <SelectTrigger className="w-56">
+              <SelectValue placeholder="Pick a coach" />
+            </SelectTrigger>
+            <SelectContent>
+              {coachPayees.map((c: any) => (
+                <SelectItem key={c.id} value={String(c.id)}>
+                  {c.name} <span className="text-xs text-muted-foreground ml-1">
+                    ({c.type === "on_demand_coach" ? "on-demand" : "salaried"})
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="flex items-center gap-4">
+          <Button variant="outline" size="icon" onClick={prevMonth}>
+            <ChevronLeft className="h-4 w-4" />
+          </Button>
+          <h2 className="text-lg font-semibold min-w-[200px] text-center">
+            {MONTHS[selectedMonth - 1]} {selectedYear}
+          </h2>
+          <Button variant="outline" size="icon" onClick={nextMonth}>
+            <ChevronRight className="h-4 w-4" />
+          </Button>
+        </div>
       </div>
 
       {/* Summary Cards */}

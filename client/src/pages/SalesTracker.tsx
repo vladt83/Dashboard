@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useRef, useEffect } from "react";
 import { trpc } from "@/lib/trpc";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -79,6 +79,15 @@ export default function SalesTracker() {
 
   const [year, setYear] = useState(2026);
   const [drilldown, setDrilldown] = useState<{ closerId: number; closerName: string; month: number } | null>(null);
+  const drilldownRef = useRef<HTMLDivElement>(null);
+
+  // When the user picks a month, scroll the drill-down into view so it isn't
+  // missed (it lives below the quarterly rollup card).
+  useEffect(() => {
+    if (drilldown && drilldownRef.current) {
+      drilldownRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [drilldown]);
 
   // Closers list (admin/payroll see picker; closer sees only themselves)
   const closers = trpc.team.getByRole.useQuery({ role: "closer" });
@@ -172,6 +181,7 @@ export default function SalesTracker() {
           ) : (
             <MonthlyGrid
               data={monthlyQuery.data ?? []}
+              selectedMonth={drilldown?.month ?? null}
               onMonthClick={(m) => {
                 if (effectiveCloserId) {
                   setDrilldown({ closerId: effectiveCloserId, closerName, month: m });
@@ -198,16 +208,18 @@ export default function SalesTracker() {
         </CardContent>
       </Card>
 
-      {/* Drilldown */}
-      {drilldown && effectiveCloserId && (
-        <DailyDrilldown
-          closerId={drilldown.closerId}
-          closerName={drilldown.closerName}
-          year={year}
-          month={drilldown.month}
-          onClose={() => setDrilldown(null)}
-        />
-      )}
+      {/* Drilldown — wrapped in ref'd div so we can scroll it into view */}
+      <div ref={drilldownRef}>
+        {drilldown && effectiveCloserId && (
+          <DailyDrilldown
+            closerId={drilldown.closerId}
+            closerName={drilldown.closerName}
+            year={year}
+            month={drilldown.month}
+            onClose={() => setDrilldown(null)}
+          />
+        )}
+      </div>
     </div>
   );
 }
@@ -216,9 +228,11 @@ export default function SalesTracker() {
 
 function MonthlyGrid({
   data,
+  selectedMonth,
   onMonthClick,
 }: {
   data: Metrics[];
+  selectedMonth: number | null;
   onMonthClick: (month: number) => void;
 }) {
   const total = sumMetrics(data);
@@ -242,13 +256,28 @@ function MonthlyGrid({
           </tr>
         </thead>
         <tbody>
-          {data.map((m, i) => (
+          {data.map((m, i) => {
+            const monthNum = i + 1;
+            const isSelected = selectedMonth === monthNum;
+            return (
             <tr
               key={i}
-              className="border-b border-border/20 hover:bg-secondary/30 cursor-pointer transition-colors"
-              onClick={() => onMonthClick(i + 1)}
+              className={
+                "border-b border-border/20 cursor-pointer transition-colors " +
+                (isSelected
+                  ? "bg-primary/15 ring-1 ring-primary/40"
+                  : "hover:bg-secondary/30")
+              }
+              onClick={() => onMonthClick(monthNum)}
             >
-              <td className="py-2 px-2 font-medium">{MONTHS[i]}</td>
+              <td className="py-2 px-2 font-medium flex items-center gap-2">
+                {MONTHS[i]}
+                {isSelected && (
+                  <span className="text-[10px] uppercase tracking-wider text-primary font-bold">
+                    drilling
+                  </span>
+                )}
+              </td>
               <td className="py-2 px-2 text-right">{m.booked || "—"}</td>
               <td className="py-2 px-2 text-right">{m.showed || "—"}</td>
               <td className="py-2 px-2 text-right">{m.canceled || "—"}</td>
@@ -264,7 +293,8 @@ function MonthlyGrid({
               <td className="py-2 px-2 text-right text-muted-foreground">{moneyOrDash(m.cashCollected, m.booked)}</td>
               <td className="py-2 px-2 text-right text-muted-foreground">{moneyOrDash(m.cashCollected, m.showed)}</td>
             </tr>
-          ))}
+            );
+          })}
           {/* Year total */}
           <tr className="border-t-2 border-primary/40 bg-primary/5 font-semibold">
             <td className="py-3 px-2 uppercase tracking-wider text-primary">Year</td>

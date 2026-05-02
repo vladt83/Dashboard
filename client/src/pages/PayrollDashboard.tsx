@@ -247,8 +247,8 @@ export default function PayrollDashboard() {
                         <td className="px-3 py-2.5 text-gray-400 capitalize">{m.role}</td>
                         <td className="px-3 py-2.5 text-gray-400">
                           {m.role === "setter"
-                            ? "3% × min(deal cash, $6,000) per one-time sale (no commission on subscriptions)"
-                            : "10% of cash collected (15% Jan–Feb '26) + 25% on active subscriptions"}
+                            ? "3% on closed one-time sales (subscriptions excluded)"
+                            : "10% of cash collected (15% Jan–Feb '26)"}
                         </td>
                         <td className="px-3 py-2.5 text-right text-white font-semibold">
                           ${m.totalOwed.toLocaleString("en-US", { minimumFractionDigits: 2 })}
@@ -260,7 +260,7 @@ export default function PayrollDashboard() {
                   {[
                     { type: "coach" as const, label: "Coaching", basis: (p: any) =>
                         p.payee.type === "on_demand_coach"
-                          ? "$0.90/min + $15/no-show, cap $2,000/mo"
+                          ? "$0.90/min + $15/no-show"
                           : `$${parseFloat(p.amount).toLocaleString()} ${p.payee.paymentFrequency}` },
                     { type: "w2" as const, label: "Operations (W2)", basis: (p: any) =>
                         `$${parseFloat(p.amount).toLocaleString()} ${p.payee.paymentFrequency}` },

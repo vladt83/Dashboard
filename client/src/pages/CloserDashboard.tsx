@@ -4,10 +4,10 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
-import { 
-  ChevronLeft, 
-  ChevronRight, 
-  DollarSign, 
+import {
+  ChevronLeft,
+  ChevronRight,
+  DollarSign,
   Trophy,
   Target,
   TrendingUp,
@@ -21,8 +21,12 @@ import {
   Flame,
   CheckCircle2,
   XCircle,
+  CalendarClock,
+  ChevronRight as ChevronRightIcon,
 } from "lucide-react";
 import { useState, useMemo } from "react";
+import { Link } from "wouter";
+import { Badge } from "@/components/ui/badge";
 
 const monthNames = [
   "January", "February", "March", "April", "May", "June",
@@ -84,12 +88,6 @@ export default function CloserDashboard() {
     { enabled: !!teamMemberId }
   );
 
-  // Get closer's subscriptions
-  const { data: subscriptions } = trpc.subscriptions.getByCloser.useQuery(
-    { closerId: teamMemberId! },
-    { enabled: !!teamMemberId }
-  );
-
   // Get leaderboard
   const { data: leaderboard, isLoading: leaderboardLoading } = trpc.stats.getCloserLeaderboard.useQuery(
     { year: selectedYear, month: selectedMonth }
@@ -118,11 +116,6 @@ export default function CloserDashboard() {
   // Revenue goal progress
   const revenueProgress = Math.min((totalRevenue / REVENUE_GOAL) * 100, 100);
   const revenueRemaining = Math.max(REVENUE_GOAL - totalRevenue, 0);
-
-  // Active subscriptions
-  const activeSubscriptions = subscriptions?.filter((s: any) => s.active) || [];
-  const monthlySubRevenue = activeSubscriptions.reduce((sum: number, s: any) => sum + parseFloat(s.monthlyAmount || "0"), 0);
-  const monthlySubCommission = monthlySubRevenue * 0.25;
 
   // Payment method breakdown
   const paymentBreakdown = useMemo(() => {
@@ -209,6 +202,10 @@ export default function CloserDashboard() {
           </Button>
         </div>
       </div>
+
+      {/* 90-day renewal pipeline — surfaces only when there's something
+          actionable. Closer's own clients only (server-gated). */}
+      <RenewalPipelineWidget />
 
       {/* $100K Revenue Goal */}
       <Card className="border-primary/30 gold-glow overflow-hidden relative">
@@ -302,7 +299,7 @@ export default function CloserDashboard() {
         </Card>
       </div>
 
-      {/* Earnings + Subscriptions Row */}
+      {/* Earnings + Payment Method Breakdown */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Total Earnings Card */}
         <Card className="border-primary/20">
@@ -313,7 +310,7 @@ export default function CloserDashboard() {
           </CardHeader>
           <CardContent>
             <div className="text-3xl font-bold text-gold-gradient mb-4">
-              {statsLoading ? <Skeleton className="h-9 w-32" /> : formatCurrency(commission + monthlySubCommission)}
+              {statsLoading ? <Skeleton className="h-9 w-32" /> : formatCurrency(commission)}
             </div>
             <div className="space-y-3">
               <div className="flex items-center justify-between p-3 bg-secondary/50 rounded-lg">
@@ -325,17 +322,10 @@ export default function CloserDashboard() {
               </div>
               <div className="flex items-center justify-between p-3 bg-secondary/50 rounded-lg">
                 <div className="flex items-center gap-2">
-                  <ArrowUp className="h-4 w-4 text-green-400" />
-                  <span className="text-sm">Subscription Commissions (25%)</span>
+                  <CheckCircle2 className="h-4 w-4 text-muted-foreground" />
+                  <span className="text-sm text-muted-foreground">Closed deals this month</span>
                 </div>
-                <span className="font-bold text-green-400">{formatCurrency(monthlySubCommission)}</span>
-              </div>
-              <div className="flex items-center justify-between p-3 bg-secondary/50 rounded-lg">
-                <div className="flex items-center gap-2">
-                  <Users className="h-4 w-4 text-blue-400" />
-                  <span className="text-sm">Active Subscriptions</span>
-                </div>
-                <span className="font-bold text-blue-400">{activeSubscriptions.length} ({formatCurrency(monthlySubRevenue)}/mo)</span>
+                <span className="font-bold">{closedCount}</span>
               </div>
             </div>
           </CardContent>
@@ -466,8 +456,8 @@ export default function CloserDashboard() {
         </CardContent>
       </Card>
 
-      {/* Recent Deals + Subscriptions */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      {/* Recent Deals */}
+      <div className="grid grid-cols-1 gap-6">
         {/* Recent Deals */}
         <Card className="border-primary/20">
           <CardHeader className="pb-3">
@@ -535,44 +525,97 @@ export default function CloserDashboard() {
           </CardContent>
         </Card>
 
-        {/* Active Subscriptions */}
-        <Card className="border-primary/20">
-          <CardHeader className="pb-3">
-            <CardTitle className="flex items-center gap-2">
-              <ArrowUp className="h-5 w-5 text-primary" /> My Subscriptions
-            </CardTitle>
-            <p className="text-sm text-muted-foreground">
-              {activeSubscriptions.length} active · {formatCurrency(monthlySubRevenue)}/mo total · You earn 25%
-            </p>
-          </CardHeader>
-          <CardContent>
-            {activeSubscriptions.length > 0 ? (
-              <div className="space-y-3">
-                {activeSubscriptions.map((sub: any) => (
-                  <div key={sub.id} className="flex items-center justify-between p-3 bg-secondary/50 rounded-lg">
-                    <div>
-                      <p className="font-medium">{sub.clientName}</p>
-                      <p className="text-xs text-muted-foreground">
-                        Since {new Date(sub.startDate).toLocaleDateString()}
-                      </p>
-                    </div>
-                    <div className="text-right">
-                      <p className="font-bold">{formatCurrency(parseFloat(sub.monthlyAmount || "0"))}/mo</p>
-                      <p className="text-xs text-green-400">
-                        You earn {formatCurrency(parseFloat(sub.monthlyAmount || "0") * 0.25)}/mo
-                      </p>
-                    </div>
-                  </div>
-                ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Renewal pipeline widget ───────────────────────────────────────────
+//
+// Shows clients whose 90-day program is ending in the next 30 days (or
+// recently lapsed). Auto-hides when the closer has nothing to act on —
+// no need to clutter the dashboard with an empty card.
+
+function RenewalPipelineWidget() {
+  const upcomingQuery = trpc.extensions.listUpcoming.useQuery();
+  const upcoming = upcomingQuery.data ?? [];
+
+  if (upcomingQuery.isLoading || upcoming.length === 0) return null;
+
+  // Bucket by phase so the closer can scan urgency at a glance
+  const finalWeek = upcoming.filter(c => c.phase === "final_week" || c.phase === "ended_grace");
+  const renewalWindow = upcoming.filter(c => c.phase === "renewal_window");
+  const lapsed = upcoming.filter(c => c.phase === "lapsed" && c.extensionStatus !== "lapsed");
+
+  return (
+    <Card className="border-amber-500/30 bg-gradient-to-br from-amber-500/5 to-card">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-lg">
+          <CalendarClock className="h-5 w-5 text-amber-400" />
+          Coming up for 90 days
+          <Badge className="ml-1 bg-amber-500/15 text-amber-400 hover:bg-amber-500/20 border-0 h-5">
+            {upcoming.length}
+          </Badge>
+        </CardTitle>
+        <p className="text-xs text-muted-foreground">
+          Reach out and book a renewal call before the program clock runs out.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-1">
+        {finalWeek.length > 0 && (
+          <RenewalBucket label="Final week — urgent" tone="amber" rows={finalWeek} />
+        )}
+        {renewalWindow.length > 0 && (
+          <RenewalBucket label="Window open" tone="primary" rows={renewalWindow} />
+        )}
+        {lapsed.length > 0 && (
+          <RenewalBucket label="Lapsed — win-back" tone="red" rows={lapsed} />
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function RenewalBucket({
+  label, tone, rows,
+}: {
+  label: string;
+  tone: "primary" | "amber" | "red";
+  rows: Array<{
+    dealId: number;
+    clientName: string;
+    daysRemaining: number;
+    extensionStatus: string | null;
+  }>;
+}) {
+  const labelTone =
+    tone === "primary" ? "text-primary" :
+    tone === "amber" ? "text-amber-400" :
+    "text-red-400";
+  return (
+    <div className="space-y-1">
+      <p className={`text-[10px] uppercase tracking-wider font-bold ${labelTone}`}>{label}</p>
+      <div className="divide-y divide-border/30">
+        {rows.map(r => (
+          <Link key={r.dealId} href={`/clients/${r.dealId}`}>
+            <a className="flex items-center gap-3 py-2 hover:bg-secondary/30 cursor-pointer rounded transition-colors px-2">
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium truncate">{r.clientName}</p>
+                <p className="text-xs text-muted-foreground">
+                  {r.daysRemaining > 0
+                    ? `${r.daysRemaining} days remaining`
+                    : r.daysRemaining === 0
+                    ? "Program ends today"
+                    : `Ended ${Math.abs(r.daysRemaining)}d ago`}
+                  {r.extensionStatus && r.extensionStatus !== "window_open" && (
+                    <> · {r.extensionStatus.replace(/_/g, " ")}</>
+                  )}
+                </p>
               </div>
-            ) : (
-              <div className="py-8 text-center text-muted-foreground">
-                <Users className="h-10 w-10 mx-auto mb-2 opacity-30" />
-                <p>No active subscriptions yet</p>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+              <ChevronRightIcon className="h-4 w-4 text-muted-foreground" />
+            </a>
+          </Link>
+        ))}
       </div>
     </div>
   );

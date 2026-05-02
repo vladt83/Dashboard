@@ -33,7 +33,7 @@ export default function CoachSOP() {
               </p>
               <p className="text-sm text-foreground/90">
                 Paid per minute. Dashboard shows minute counter, monthly pay,
-                $2K cap, and no-show count. Recording link is optional.
+                and no-show count. Recording link is optional.
               </p>
             </div>
             <div className="rounded-lg border border-purple-500/30 bg-purple-500/5 p-4">
@@ -42,8 +42,8 @@ export default function CoachSOP() {
               </p>
               <p className="text-sm text-foreground/90">
                 Fixed bi-weekly pay. Dashboard shows session counts only — no
-                pay calculator, no warnings, no caps. Sessions are tracked
-                purely for content quality and attendance.
+                pay calculator, no warnings. Sessions are tracked purely for
+                content quality and attendance.
               </p>
             </div>
           </div>
@@ -128,7 +128,7 @@ export default function CoachSOP() {
                 <div className="flex justify-between text-sm"><span>Total minutes:</span><span>1,420</span></div>
                 <div className="flex justify-between text-sm"><span>No-shows:</span><span>4</span></div>
                 <div className="flex justify-between text-sm"><span>Earned this month:</span><span className="text-primary font-semibold">$1,338.00</span></div>
-                <div className="flex justify-between text-sm"><span>Cap progress:</span><span>$1,338 of $2,000</span></div>
+                <div className="flex justify-between text-sm"><span>Sessions logged:</span><span>23</span></div>
               </div>
             </MockScreen>
 
@@ -165,13 +165,7 @@ export default function CoachSOP() {
             </p>
             <p className="leading-relaxed">
               <span className="text-primary">monthly pay</span> ={" "}
-              <span className="text-amber-400">min</span>(
-              <br />
-              &nbsp;&nbsp;(total minutes × $0.90) + (no-shows × $15),
-              <br />
-              &nbsp;&nbsp;<span className="text-amber-400">$2,000</span>
-              <br />
-              )
+              (total minutes × $0.90) + (no-shows × $15)
             </p>
           </div>
 
@@ -186,6 +180,15 @@ export default function CoachSOP() {
               total="$303.00"
             />
             <ExampleCard
+              label="Mid month"
+              lines={[
+                ["Minutes", "1,200"],
+                ["× $0.90", "$1,080.00"],
+                ["No-shows", "3 ($45)"],
+              ]}
+              total="$1,125.00"
+            />
+            <ExampleCard
               label="Solid month"
               lines={[
                 ["Minutes", "1,800"],
@@ -193,23 +196,13 @@ export default function CoachSOP() {
                 ["No-shows", "5 ($75)"],
               ]}
               total="$1,695.00"
-            />
-            <ExampleCard
-              label="Hit the cap"
-              lines={[
-                ["Minutes", "2,400"],
-                ["× $0.90", "$2,160.00"],
-                ["Pre-cap total", "$2,160.00"],
-              ]}
-              total="$2,000.00 (capped)"
               hot
             />
           </div>
 
           <Why>
-            The $2,000 cap protects margins on heavy months. You can run more
-            sessions — but you'll see the cap message in your dashboard once
-            you hit it. Anything past that is donated time.
+            Volume drives your monthly pay. Watch the dashboard in real time —
+            it updates the moment you log a session.
           </Why>
         </CardContent>
       </Card>
@@ -263,7 +256,7 @@ export default function CoachSOP() {
           <ol className="space-y-2 text-sm">
             <li className="flex gap-3"><span className="text-primary font-bold">1.</span><span>Session ends → open dashboard → fill form → save.</span></li>
             <li className="flex gap-3"><span className="text-primary font-bold">2.</span><span>Recording link is optional. Always.</span></li>
-            <li className="flex gap-3"><span className="text-primary font-bold">3.</span><span>Leo only: watch the cap progress bar.</span></li>
+            <li className="flex gap-3"><span className="text-primary font-bold">3.</span><span>Leo only: monthly pay updates live as you log sessions.</span></li>
             <li className="flex gap-3"><span className="text-primary font-bold">4.</span><span>Salaried: no pay shown is correct — your salary is fixed.</span></li>
           </ol>
         </CardContent>

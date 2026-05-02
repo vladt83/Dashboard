@@ -26,7 +26,7 @@ import {
   LayoutDashboard, LogOut, PanelLeft, PlusCircle, Settings, Wallet,
   FileText, CreditCard, CalendarDays, BarChart3, Users,
   ChevronDown, TrendingUp, DollarSign, Megaphone, ShieldCheck, GraduationCap, KeyRound,
-  PhoneIncoming, CalendarPlus, BookOpen, Network, FileSpreadsheet
+  PhoneIncoming, CalendarPlus, BookOpen, Network, FileSpreadsheet, UserCheck
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
@@ -44,16 +44,17 @@ const fullNavSections = [
       { icon: LayoutDashboard, label: "Dashboard", path: "/", permPath: "/" },
       { icon: PlusCircle, label: "New Entry", path: "/deals/new", permPath: "/new-entry" },
       { icon: FileText, label: "My Deals", path: "/my-deals", permPath: "/my-deals" },
+      { icon: Users, label: "Clients", path: "/clients", permPath: "/clients" },
       { icon: FileSpreadsheet, label: "Sales Tracker", path: "/sales-tracker", permPath: "/sales-tracker" },
-      { icon: PhoneIncoming, label: "Setter Bookings", path: "/setter-bookings", permPath: "/setter-bookings" },
+      { icon: PhoneIncoming, label: "Setter Intel", path: "/setter-bookings", permPath: "/setter-bookings" },
       { icon: CalendarDays, label: "Payment Plans", path: "/payment-plans", permPath: "/payment-plans" },
-      { icon: Users, label: "Subscriptions", path: "/subscriptions", permPath: "/subscriptions" },
     ],
   },
   {
     label: "Payroll",
     icon: DollarSign,
     items: [
+      { icon: UserCheck, label: "Onboarding", path: "/onboarding", permPath: "/onboarding" },
       { icon: CreditCard, label: "Payroll Dashboard", path: "/payroll", permPath: "/payroll" },
       { icon: Wallet, label: "Commission Payouts", path: "/payouts", permPath: "/payouts" },
       { icon: GraduationCap, label: "Coaching Sessions", path: "/coaching-sessions", permPath: "/coaching-sessions" },
@@ -86,6 +87,7 @@ const coachNavSections = [
     icon: GraduationCap,
     items: [
       { icon: LayoutDashboard, label: "My Dashboard", path: "/", permPath: "/" },
+      { icon: Users, label: "Clients", path: "/clients", permPath: "/clients" },
       { icon: BookOpen, label: "How To (SOP)", path: "/sop", permPath: "/sop" },
     ],
   },
@@ -100,9 +102,9 @@ const closerNavSections = [
       { icon: LayoutDashboard, label: "My Dashboard", path: "/", permPath: "/" },
       { icon: FileText, label: "My Deals", path: "/my-deals", permPath: "/my-deals" },
       { icon: PlusCircle, label: "New Entry", path: "/deals/new", permPath: "/new-entry" },
+      { icon: Users, label: "Clients", path: "/clients", permPath: "/clients" },
       { icon: FileSpreadsheet, label: "Sales Tracker", path: "/sales-tracker", permPath: "/sales-tracker" },
-      { icon: PhoneIncoming, label: "Setter Bookings", path: "/setter-bookings", permPath: "/setter-bookings" },
-      { icon: Users, label: "Subscriptions", path: "/subscriptions", permPath: "/subscriptions" },
+      { icon: PhoneIncoming, label: "Setter Intel", path: "/setter-bookings", permPath: "/setter-bookings" },
       { icon: BookOpen, label: "How To (SOP)", path: "/sop", permPath: "/sop" },
     ],
   },
@@ -115,23 +117,61 @@ const setterNavSections = [
     icon: CalendarPlus,
     items: [
       { icon: LayoutDashboard, label: "My Dashboard", path: "/", permPath: "/" },
+      { icon: Users, label: "Clients", path: "/clients", permPath: "/clients" },
       { icon: BookOpen, label: "How To (SOP)", path: "/sop", permPath: "/sop" },
     ],
   },
 ];
 
-// Payroll-only navigation
+// Client-only navigation (the trader who paid for the program)
+const clientNavSections = [
+  {
+    label: "Trader",
+    icon: TrendingUp,
+    items: [
+      { icon: LayoutDashboard, label: "My Dashboard", path: "/", permPath: "/" },
+    ],
+  },
+];
+
+// Payroll-role navigation. Split into THREE function-scoped groups so each
+// can be independently granted via permissions:
+//   - "Onboarding" group  — gated by  /onboarding
+//   - "Payroll" group     — gated by  /payroll-dashboard (and friends)
+//   - "Help" group        — always visible
+// Ariana currently has both groups. If we hire a dedicated onboarding
+// specialist, give them /onboarding only and they'll see just that group.
+// Same for a dedicated payroll specialist — only /payroll-dashboard etc.
 const payrollNavSections = [
+  {
+    label: "Home",
+    icon: LayoutDashboard,
+    items: [
+      { icon: LayoutDashboard, label: "Dashboard", path: "/", permPath: "/" },
+    ],
+  },
+  {
+    label: "Onboarding",
+    icon: UserCheck,
+    items: [
+      { icon: UserCheck, label: "Client Onboarding", path: "/onboarding", permPath: "/onboarding" },
+      { icon: Users, label: "Clients", path: "/clients", permPath: "/clients" },
+    ],
+  },
   {
     label: "Payroll",
     icon: DollarSign,
     items: [
-      { icon: LayoutDashboard, label: "Dashboard", path: "/", permPath: "/" },
-      { icon: CreditCard, label: "Payroll Dashboard", path: "/payroll", permPath: "/payroll" },
+      { icon: CreditCard, label: "Payroll Dashboard", path: "/payroll", permPath: "/payroll-dashboard" },
       { icon: Wallet, label: "Commission Payouts", path: "/payouts", permPath: "/payouts" },
       { icon: CalendarDays, label: "Payment Plans", path: "/payment-plans", permPath: "/payment-plans" },
-      { icon: Users, label: "Subscriptions", path: "/subscriptions", permPath: "/subscriptions" },
       { icon: GraduationCap, label: "Coaching Sessions", path: "/coaching-sessions", permPath: "/coaching-sessions" },
+    ],
+  },
+  {
+    label: "Help",
+    icon: BookOpen,
+    items: [
       { icon: BookOpen, label: "How To (SOP)", path: "/sop", permPath: "/sop" },
     ],
   },
@@ -235,6 +275,7 @@ function DashboardLayoutContent({
   const isCloser = user?.role === "closer";
   const isPayroll = user?.role === "payroll";
   const isSetter = user?.role === "setter";
+  const isClient = user?.role === "client";
 
   // Role-specific navigation
   const activeNavSections = isCoach
@@ -245,7 +286,9 @@ function DashboardLayoutContent({
         ? payrollNavSections
         : isSetter
           ? setterNavSections
-          : fullNavSections;
+          : isClient
+            ? clientNavSections
+            : fullNavSections;
 
   // Track which sections are open (default all open)
   const [openSections, setOpenSections] = useState<Record<string, boolean>>(() => {
@@ -445,7 +488,9 @@ function DashboardLayoutContent({
                         : user?.role === "payroll" ? "Payroll Admin"
                         : user?.role === "coach" ? "Coach"
                         : user?.role === "setter" ? "Setter"
-                        : "Closer"}
+                        : user?.role === "client" ? "Trader"
+                        : user?.role === "closer" ? "Closer"
+                        : "—"}
                     </p>
                   </div>
                 </button>

@@ -16,6 +16,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { format } from "date-fns";
+import { Link } from "wouter";
 
 export default function MyDeals() {
   const { user } = useAuth();
@@ -52,10 +53,29 @@ export default function MyDeals() {
     { closerId: selectedCloserId || 0, year, month },
     { enabled: !!selectedCloserId }
   );
-  
+
+  // Setters list — needed for the setter-attribution dropdown in the edit dialog.
+  const { data: setters } = trpc.team.getByRole.useQuery({ role: "setter" });
+
+  // We invalidate every dependent namespace after a save so the dashboard,
+  // leaderboard, payroll summary, sales tracker, and setter payouts all
+  // reflect the new numbers without a manual refresh.
+  const utils = trpc.useUtils();
+  const invalidateEverythingDealLevel = async () => {
+    await Promise.all([
+      utils.deals.invalidate(),
+      utils.stats.invalidate(),
+      utils.dashboard.invalidate(),
+      utils.salesTracker.invalidate(),
+      utils.payeePayments.invalidate(),
+      utils.setter.invalidate(),
+    ]);
+  };
+
   const updateDealMutation = trpc.deals.update.useMutation({
-    onSuccess: () => {
-      toast.success("Deal updated successfully!");
+    onSuccess: async () => {
+      toast.success("Deal updated. Dashboards and payroll refreshed.");
+      await invalidateEverythingDealLevel();
       refetchDeals();
       setEditingDeal(null);
       setIsEditMode(false);
@@ -67,8 +87,9 @@ export default function MyDeals() {
   });
 
   const deleteDealMutation = trpc.deals.delete.useMutation({
-    onSuccess: () => {
-      toast.success("Deal deleted successfully!");
+    onSuccess: async () => {
+      toast.success("Deal deleted. Dashboards and payroll refreshed.");
+      await invalidateEverythingDealLevel();
       refetchDeals();
       setDeletingDeal(null);
       setViewingDeal(null);
@@ -79,10 +100,11 @@ export default function MyDeals() {
   });
 
   const [collectingPayment, setCollectingPayment] = useState<any>(null);
-  
+
   const collectPaymentMutation = trpc.deals.collectPaymentPlanPayment.useMutation({
-    onSuccess: () => {
-      toast.success("Payment collected! Next month's entry has been created.");
+    onSuccess: async () => {
+      toast.success("Payment collected. Dashboards and payroll refreshed.");
+      await invalidateEverythingDealLevel();
       refetchDeals();
       setCollectingPayment(null);
     },
@@ -106,15 +128,69 @@ export default function MyDeals() {
   const handleEditDeal = (deal: any) => {
     setEditingDeal(deal);
     setEditNotes(deal.notes || "");
-  };
-  
-  const handleSaveNotes = () => {
-    if (!editingDeal) return;
-    
-    updateDealMutation.mutate({
-      id: editingDeal.id,
-      notes: editNotes,
+    // Pre-populate the full edit form with current values. Money fields are
+    // strings to play nice with controlled inputs.
+    setEditForm({
+      clientName: deal.clientName ?? "",
+      dealDate: deal.dealDate ?? "",
+      setterId: deal.setterId ? String(deal.setterId) : "",
+      showed: !!deal.showed,
+      prepared: !!deal.prepared,
+      offered: !!deal.offered,
+      canceled: !!deal.canceled,
+      closed: !!deal.closed,
+      isNewClient: !!deal.isNewClient,
+      fullyPaid: !!deal.fullyPaid,
+      totalDealAmount: String(parseFloat(deal.totalDealAmount || "0")),
+      newCashCollected: String(parseFloat(deal.newCashCollected || "0")),
+      existingCashCollected: String(parseFloat(deal.existingCashCollected || "0")),
+      bnplFee: String(parseFloat(deal.bnplFee || "0")),
+      downPayment: String(parseFloat(deal.downPayment || "0")),
+      monthlyAmount: String(parseFloat(deal.monthlyAmount || "0")),
+      paymentType: deal.paymentType ?? "",
+      docusignSigned: !!deal.docusignSigned,
     });
+  };
+
+  const handleSaveDeal = () => {
+    if (!editingDeal) return;
+
+    // Build payload — all fields are optional on the server, so we only
+    // include what makes sense given the deal's payment type.
+    const payload: any = {
+      id: editingDeal.id,
+      clientName: editForm.clientName.trim(),
+      dealDate: editForm.dealDate,
+      setterId: editForm.setterId ? parseInt(editForm.setterId) : null,
+      showed: editForm.showed,
+      prepared: editForm.prepared,
+      offered: editForm.offered,
+      canceled: editForm.canceled,
+      closed: editForm.closed,
+      isNewClient: editForm.isNewClient,
+      fullyPaid: editForm.fullyPaid,
+      totalDealAmount: parseFloat(editForm.totalDealAmount) || 0,
+      existingCashCollected: parseFloat(editForm.existingCashCollected) || 0,
+      notes: editNotes,
+      docusignSigned: !!editForm.docusignSigned,
+    };
+
+    // Cash collected logic mirrors NewDeal: for in-house plans we use the
+    // down payment as the cash basis; for BNPL we store gross-minus-fee.
+    if (editForm.paymentType === "in_house_payment_plan") {
+      payload.newCashCollected = parseFloat(editForm.downPayment) || 0;
+      payload.downPayment = parseFloat(editForm.downPayment) || 0;
+      payload.monthlyAmount = parseFloat(editForm.monthlyAmount) || 0;
+    } else if (editForm.paymentType === "bnpl") {
+      const gross = parseFloat(editForm.newCashCollected) || 0;
+      const fee = parseFloat(editForm.bnplFee) || 0;
+      payload.newCashCollected = Math.max(0, gross - fee);
+      payload.bnplFee = fee;
+    } else {
+      payload.newCashCollected = parseFloat(editForm.newCashCollected) || 0;
+    }
+
+    updateDealMutation.mutate(payload);
   };
   
   const handleToggleField = (deal: any, field: "showed" | "prepared" | "closed" | "fullyPaid") => {
@@ -279,12 +355,14 @@ export default function MyDeals() {
                             )}
                           </td>
                           <td className="py-3 pr-4 text-sm font-medium text-white">
-                            <button
-                              onClick={() => setViewingDeal(deal)}
+                            {/* Click name → unified Client Profile (everything
+                                we know about this client in one place). */}
+                            <Link
+                              href={`/clients/${deal.parentDealId ?? deal.id}`}
                               className="hover:text-[#c7ab77] hover:underline cursor-pointer text-left"
                             >
                               {deal.clientName}
-                            </button>
+                            </Link>
                           </td>
                           <td className="py-3 pr-4 text-sm text-zinc-400">
 
@@ -329,8 +407,14 @@ export default function MyDeals() {
                               )
                             )}
                           </td>
-                          <td className="py-3 pr-4 text-right text-sm font-medium text-green-400">
-                            {formatCurrency(deal.closerCommission)}
+                          <td className="py-3 pr-4 text-right text-sm font-medium">
+                            {deal.closed && !deal.docusignSigned ? (
+                              <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-md bg-amber-500/15 text-amber-400 border border-amber-500/30">
+                                Pending DocuSign
+                              </span>
+                            ) : (
+                              <span className="text-green-400">{formatCurrency(deal.closerCommission)}</span>
+                            )}
                           </td>
                           <td className="py-3 pr-4 text-center">
                             <Checkbox
@@ -371,34 +455,212 @@ export default function MyDeals() {
           </Card>
         )}
         
-        {/* Edit Notes Dialog */}
-        <Dialog open={!!editingDeal} onOpenChange={() => setEditingDeal(null)}>
-          <DialogContent className="bg-zinc-900 border-zinc-800">
+        {/* Edit Deal Dialog — comprehensive (all editable fields) */}
+        <Dialog open={!!editingDeal} onOpenChange={(open) => !open && setEditingDeal(null)}>
+          <DialogContent className="bg-zinc-900 border-zinc-800 max-w-3xl max-h-[90vh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle className="text-white">
-                Edit Notes for {editingDeal?.clientName}
+                Edit Deal — {editingDeal?.clientName}
               </DialogTitle>
               <DialogDescription>
-                Update the notes for this deal.
+                Changes here recalculate closer commission, setter commission (if attributed),
+                and feed straight into Dashboard, Payroll, and Sales Tracker.
               </DialogDescription>
             </DialogHeader>
-            
-            <div className="space-y-4 py-4">
+
+            <div className="space-y-5 py-2">
+              {/* Client + date */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label className="text-zinc-300">Client Name</Label>
+                  <Input
+                    value={editForm.clientName ?? ""}
+                    onChange={(e) => setEditForm({ ...editForm, clientName: e.target.value })}
+                    className="border-zinc-700 bg-zinc-800 text-white"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-zinc-300">Deal Date</Label>
+                  <Input
+                    type="date"
+                    value={editForm.dealDate ?? ""}
+                    onChange={(e) => setEditForm({ ...editForm, dealDate: e.target.value })}
+                    className="border-zinc-700 bg-zinc-800 text-white"
+                  />
+                </div>
+              </div>
+
+              {/* Setter attribution */}
+              <div className="space-y-2">
+                <Label className="text-zinc-300">Setter (who booked this call)</Label>
+                <Select
+                  value={editForm.setterId || "none"}
+                  onValueChange={(v) =>
+                    setEditForm({ ...editForm, setterId: v === "none" ? "" : v })
+                  }
+                >
+                  <SelectTrigger className="border-zinc-700 bg-zinc-800 text-white">
+                    <SelectValue placeholder="Self-generated lead" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">Self-generated lead (no setter)</SelectItem>
+                    {(setters ?? []).map(s => (
+                      <SelectItem key={s.id} value={String(s.id)}>{s.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-zinc-500">
+                  Changing this re-attributes the setter's 3% commission (capped at $6K cash) — payroll updates automatically.
+                </p>
+              </div>
+
+              {/* Funnel checkboxes */}
+              <div className="space-y-2">
+                <Label className="text-zinc-300">Funnel</Label>
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+                  {([
+                    { key: "showed",   label: "Showed" },
+                    { key: "prepared", label: "Prepared" },
+                    { key: "offered",  label: "Offered" },
+                    { key: "canceled", label: "Canceled" },
+                    { key: "closed",   label: "Closed" },
+                  ] as const).map(f => (
+                    <label key={f.key} className="flex items-center gap-2 p-2 rounded bg-zinc-800/50 border border-zinc-800 cursor-pointer">
+                      <Checkbox
+                        checked={!!editForm[f.key]}
+                        onCheckedChange={(c) => setEditForm({ ...editForm, [f.key]: !!c })}
+                      />
+                      <span className="text-sm text-white">{f.label}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {/* Money fields — what's shown depends on payment type */}
+              <div className="rounded-lg border border-[#c7ab77]/30 bg-[#c7ab77]/5 p-4 space-y-3">
+                <p className="text-xs uppercase tracking-wider text-[#c7ab77] font-bold">
+                  Money — payment type: {editForm.paymentType?.replace(/_/g, " ") || "—"}
+                </p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label className="text-zinc-300">Amount Charged to Client</Label>
+                    <Input
+                      type="number" step="0.01" min="0"
+                      value={editForm.totalDealAmount ?? ""}
+                      onChange={(e) => setEditForm({ ...editForm, totalDealAmount: e.target.value })}
+                      className="border-zinc-700 bg-zinc-800 text-white"
+                    />
+                  </div>
+
+                  {editForm.paymentType === "full_pay" && (
+                    <div className="space-y-2">
+                      <Label className="text-zinc-300">Cash Collected</Label>
+                      <Input
+                        type="number" step="0.01" min="0"
+                        value={editForm.newCashCollected ?? ""}
+                        onChange={(e) => setEditForm({ ...editForm, newCashCollected: e.target.value })}
+                        className="border-zinc-700 bg-zinc-800 text-white"
+                      />
+                    </div>
+                  )}
+
+                  {editForm.paymentType === "in_house_payment_plan" && (
+                    <>
+                      <div className="space-y-2">
+                        <Label className="text-zinc-300">Down Payment (Collected Today)</Label>
+                        <Input
+                          type="number" step="0.01" min="0"
+                          value={editForm.downPayment ?? ""}
+                          onChange={(e) => setEditForm({ ...editForm, downPayment: e.target.value })}
+                          className="border-zinc-700 bg-zinc-800 text-white"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label className="text-zinc-300">Monthly Payment Amount</Label>
+                        <Input
+                          type="number" step="0.01" min="0"
+                          value={editForm.monthlyAmount ?? ""}
+                          onChange={(e) => setEditForm({ ...editForm, monthlyAmount: e.target.value })}
+                          className="border-zinc-700 bg-zinc-800 text-white"
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  {editForm.paymentType === "bnpl" && (
+                    <>
+                      <div className="space-y-2">
+                        <Label className="text-zinc-300">Charged via BNPL (gross)</Label>
+                        <Input
+                          type="number" step="0.01" min="0"
+                          value={editForm.newCashCollected ?? ""}
+                          onChange={(e) => setEditForm({ ...editForm, newCashCollected: e.target.value })}
+                          className="border-zinc-700 bg-zinc-800 text-white"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label className="text-zinc-300">BNPL Fee</Label>
+                        <Input
+                          type="number" step="0.01" min="0"
+                          value={editForm.bnplFee ?? ""}
+                          onChange={(e) => setEditForm({ ...editForm, bnplFee: e.target.value })}
+                          className="border-zinc-700 bg-zinc-800 text-white"
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  <div className="space-y-2">
+                    <Label className="text-zinc-300">Existing Client Cash</Label>
+                    <Input
+                      type="number" step="0.01" min="0"
+                      value={editForm.existingCashCollected ?? ""}
+                      onChange={(e) => setEditForm({ ...editForm, existingCashCollected: e.target.value })}
+                      className="border-zinc-700 bg-zinc-800 text-white"
+                    />
+                  </div>
+                </div>
+
+                {/* Live recap of what will be saved as cash collected */}
+                {editForm.paymentType === "bnpl" && (
+                  <p className="text-xs text-zinc-400">
+                    Cash that will be saved: <span className="text-[#c7ab77] font-semibold">
+                      ${Math.max(0, (parseFloat(editForm.newCashCollected) || 0) - (parseFloat(editForm.bnplFee) || 0)).toFixed(2)}
+                    </span> (gross − fee)
+                  </p>
+                )}
+              </div>
+
+              {/* DocuSign gate — closer flips this when contract is signed.
+                  Until it's true, no commission is calculated for this deal. */}
+              <div className="rounded-lg border-2 border-amber-500/40 bg-amber-500/5 p-4">
+                <label className="flex items-start gap-3 cursor-pointer">
+                  <Checkbox
+                    checked={!!editForm.docusignSigned}
+                    onCheckedChange={(c) => setEditForm({ ...editForm, docusignSigned: !!c })}
+                    className="mt-0.5"
+                  />
+                  <div className="flex-1">
+                    <p className="font-semibold text-white text-sm">DocuSign signed by the client</p>
+                    <p className="text-xs text-zinc-400 mt-1">
+                      Commission is only calculated once this is checked. If the
+                      client never signs, the deal stays at $0 commission.
+                    </p>
+                  </div>
+                </label>
+              </div>
+
+              {/* Notes */}
               <div className="space-y-2">
                 <Label className="text-zinc-300">Notes</Label>
                 <Textarea
                   value={editNotes}
                   onChange={(e) => setEditNotes(e.target.value)}
-                  placeholder="Add notes about this deal..."
-                  className="min-h-[120px] border-zinc-700 bg-zinc-800 text-white"
+                  className="min-h-[80px] border-zinc-700 bg-zinc-800 text-white"
                 />
               </div>
-              
-              <div className="rounded-lg bg-[#c7ab77]/10 p-3 text-sm text-[#c7ab77]">
-
-              </div>
             </div>
-            
+
             <DialogFooter>
               <Button
                 variant="outline"
@@ -408,12 +670,12 @@ export default function MyDeals() {
                 Cancel
               </Button>
               <Button
-                onClick={handleSaveNotes}
+                onClick={handleSaveDeal}
                 disabled={updateDealMutation.isPending}
                 className="bg-[#c7ab77] text-black hover:bg-[#b89a66]"
               >
                 <Save className="h-4 w-4 mr-2" />
-                Save Notes
+                {updateDealMutation.isPending ? "Saving…" : "Save Changes"}
               </Button>
             </DialogFooter>
           </DialogContent>

@@ -35,8 +35,9 @@ const BRANCHES: Branch[] = [
     angle: 90,
     leaves: [
       { label: "Admin", detail: "Vlad Tayman" },
-      { label: "Closer", detail: "Steve · Jhalil · Jake" },
-      { label: "Setter", detail: "Kresha Koirala" },
+      { label: "Closer", detail: "Steve · Jhalil" },
+      { label: "Text Setter", detail: "Kresha Koirala" },
+      { label: "VSL Setter", detail: "Jake Glass" },
       { label: "Coach", detail: "Leo · Elliot · Erin" },
       { label: "Payroll", detail: "Ariana Tayman" },
     ],
@@ -47,8 +48,8 @@ const BRANCHES: Branch[] = [
     bgFaint: "rgba(16,185,129,0.10)",
     angle: 30,
     leaves: [
-      { label: "1. Setter books call", detail: "from text outreach", href: "/setter-bookings" },
-      { label: "2. Closer sees booking", detail: "Setter Bookings tab", href: "/setter-bookings" },
+      { label: "1. Setter sets call", detail: "Kresha · Call Setting (3%) / Jake · Pre Call (2%)", href: "/setter-bookings" },
+      { label: "2. Closer reads setter intel", detail: "before opening the call", href: "/setter-bookings" },
       { label: "3. Run the call", detail: "show / prepared / closed" },
       { label: "4. Save deal + setter", detail: "/deals/new", href: "/deals/new" },
       { label: "5. Commissions auto-compute", detail: "stored on deals row" },
@@ -64,7 +65,6 @@ const BRANCHES: Branch[] = [
       { label: "Elliot (salaried)", detail: "$2,050 bi-weekly fixed" },
       { label: "Erin (W2)", detail: "$2,500 bi-weekly fixed" },
       { label: "Recording link", detail: "OPTIONAL — no penalty" },
-      { label: "$2K monthly cap", detail: "Leo only" },
     ],
   },
   {
@@ -74,9 +74,9 @@ const BRANCHES: Branch[] = [
     angle: -90,
     leaves: [
       { label: "Closer 10%", detail: "15% Jan–Feb 2026" },
-      { label: "Setter 3%", detail: "capped $6K cash / deal" },
-      { label: "Subscription 25%", detail: "to closer, recurring" },
-      { label: "No setter on subs", detail: "subs never pay setter" },
+      { label: "Closer 9% (in-house)", detail: "Fanbasis / Denefits / Client Financing" },
+      { label: "Setter 3%", detail: "on closed deals attributed" },
+      { label: "DocuSign gate", detail: "no commission until signed" },
       { label: "BNPL net of fee", detail: "commission on net cash" },
     ],
   },
@@ -87,10 +87,10 @@ const BRANCHES: Branch[] = [
     angle: -150,
     leaves: [
       { label: "deals", detail: "closer + setter commissions" },
-      { label: "subscriptions", detail: "no setterId — by design" },
-      { label: "bookedCalls", detail: "setter → closer assignment" },
+      { label: "bookedCalls", detail: "Kresha's text bookings" },
+      { label: "vslCallPreps", detail: "Jake's 5-question discovery" },
       { label: "coachingSessions", detail: "minutes, no-show, payee link" },
-      { label: "subscriptionVerifications", detail: "monthly 25% gate" },
+      { label: "dailyStats", detail: "imported 2026 historical data" },
     ],
   },
   {
@@ -100,7 +100,7 @@ const BRANCHES: Branch[] = [
     angle: 150,
     leaves: [
       { label: "Dashboard", detail: "home for each role", href: "/" },
-      { label: "New Entry", detail: "sale + subscription forms", href: "/deals/new" },
+      { label: "New Entry", detail: "sale entry form", href: "/deals/new" },
       { label: "My Deals", detail: "closer's own entries", href: "/my-deals" },
       { label: "Payroll Dashboard", detail: "spend overview + tabs", href: "/payroll" },
       { label: "SOPs", detail: "per-role visual guides", href: "/sop" },

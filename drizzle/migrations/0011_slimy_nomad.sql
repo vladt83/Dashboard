@@ -1,0 +1,1 @@
+ALTER TABLE "payees" ADD COLUMN "bookingUrl" varchar(500);

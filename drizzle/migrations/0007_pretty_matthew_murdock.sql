@@ -1,0 +1,21 @@
+CREATE TABLE "dealOnboardings" (
+	"id" serial PRIMARY KEY NOT NULL,
+	"dealId" integer NOT NULL,
+	"skoolAccessGranted" boolean DEFAULT false NOT NULL,
+	"skoolAccessAt" timestamp,
+	"paymentVerified" boolean DEFAULT false NOT NULL,
+	"paymentVerifiedAt" timestamp,
+	"paymentNote" text,
+	"sessionsBookedCount" integer DEFAULT 0 NOT NULL,
+	"sessionsTarget" integer DEFAULT 4 NOT NULL,
+	"clientOptedOutOfSessions" boolean DEFAULT false NOT NULL,
+	"coachAssignedPayeeId" integer,
+	"tradingLogAssigned" boolean DEFAULT false NOT NULL,
+	"weeklyCheckInSent" boolean DEFAULT false NOT NULL,
+	"onboardedAt" timestamp,
+	"onboardedById" integer,
+	"notes" text,
+	"createdAt" timestamp DEFAULT now() NOT NULL,
+	"updatedAt" timestamp DEFAULT now() NOT NULL,
+	CONSTRAINT "dealOnboardings_dealId_unique" UNIQUE("dealId")
+);

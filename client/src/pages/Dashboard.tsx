@@ -261,7 +261,7 @@ function CompanyPerformanceTab({ year, month, statsLoading, monthlyStats }: any)
                   {formatCurrency(newMonthlyRevenue)}
                 </p>
                 <p className="text-xs text-muted-foreground mt-1">
-                  Payment plans + subscriptions
+                  Payment plans
                 </p>
               </div>
               <div className="p-3 rounded-full bg-purple-500/10"><ArrowUp className="h-5 w-5 text-purple-400" /></div>
@@ -349,13 +349,18 @@ function SalesTeamTab({ year, month }: { year: number; month: number }) {
   const { data: closerLeaderboard, isLoading: closerLoading } = trpc.stats.getCloserLeaderboard.useQuery({ year, month });
   const { data: monthlyStats } = trpc.stats.getMonthly.useQuery({ year, month });
 
-  // Build comparison chart data
+  // Build comparison chart data — three buckets per closer:
+  //   1. Cash Collected      — money in the bank now
+  //   2. Financed (Future)   — outstanding in-house payment plan balance
+  //                            (Fanbasis / Denefits — we collect later)
+  //   3. BNPL Fees           — fees absorbed across BNPL deals
   const closerChartData = useMemo(() => {
     if (!closerLeaderboard) return [];
     return closerLeaderboard.map((c: any) => ({
-      name: c.name.split(" ")[0], // First name only for chart
+      name: c.name.split(" ")[0],
       collected: c.totalCashCollected,
-      commission: c.closerCommission,
+      financed: c.financedFuture || 0,
+      bnplFees: c.bnplFees || 0,
       deals: c.closedCount,
       liveCalls: c.totalDeals || 0,
       showRate: c.showPercentage || 0,
@@ -372,26 +377,47 @@ function SalesTeamTab({ year, month }: { year: number; month: number }) {
             <CardTitle className="flex items-center gap-2">
               <BarChart3 className="h-5 w-5 text-primary" /> Closer Revenue Comparison
             </CardTitle>
-            <p className="text-sm text-muted-foreground">Head-to-head cash collected this month</p>
+            <p className="text-sm text-muted-foreground">
+              Cash now vs financed-future (Fanbasis / Denefits) vs BNPL fees
+            </p>
           </CardHeader>
           <CardContent>
-            <div className="h-[300px]">
+            <div className="h-[320px]">
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={closerChartData} barGap={8}>
+                <BarChart data={closerChartData} barGap={6}>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(199,171,119,0.1)" />
                   <XAxis dataKey="name" stroke="#999" fontSize={12} />
                   <YAxis stroke="#999" fontSize={12} tickFormatter={(v) => `$${(v / 1000).toFixed(0)}K`} />
                   <Tooltip
                     contentStyle={{ backgroundColor: '#1a1a1a', border: '1px solid #c7ab77', borderRadius: '8px' }}
-                    formatter={(value: number, name: string) => [
-                      formatCurrency(value),
-                      name === "collected" ? "Cash Collected" : "Commission"
-                    ]}
+                    formatter={(value: number, name: string) => {
+                      const labels: Record<string, string> = {
+                        collected: "Cash Collected",
+                        financed: "Financed (future)",
+                        bnplFees: "BNPL Fees",
+                      };
+                      return [formatCurrency(value), labels[name] ?? name];
+                    }}
                   />
                   <Bar dataKey="collected" fill="#c7ab77" radius={[4, 4, 0, 0]} name="collected" />
-                  <Bar dataKey="commission" fill="#4ade80" radius={[4, 4, 0, 0]} name="commission" />
+                  <Bar dataKey="financed"  fill="#3b82f6" radius={[4, 4, 0, 0]} name="financed" />
+                  <Bar dataKey="bnplFees"  fill="#ef4444" radius={[4, 4, 0, 0]} name="bnplFees" />
                 </BarChart>
               </ResponsiveContainer>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4 text-xs text-muted-foreground">
+              <div className="flex items-start gap-2">
+                <span className="h-3 w-3 rounded-sm bg-[#c7ab77] mt-0.5 shrink-0" />
+                <span><span className="text-foreground font-semibold">Cash Collected</span> — money in hand right now (full pay + down payments + BNPL net)</span>
+              </div>
+              <div className="flex items-start gap-2">
+                <span className="h-3 w-3 rounded-sm bg-[#3b82f6] mt-0.5 shrink-0" />
+                <span><span className="text-foreground font-semibold">Financed (Future)</span> — outstanding balance on in-house payment plans (Fanbasis / Denefits) we'll collect over time</span>
+              </div>
+              <div className="flex items-start gap-2">
+                <span className="h-3 w-3 rounded-sm bg-[#ef4444] mt-0.5 shrink-0" />
+                <span><span className="text-foreground font-semibold">BNPL Fees</span> — fees absorbed across BNPL-financed deals (Climb, ClarityPay, HFD, etc.)</span>
+              </div>
             </div>
           </CardContent>
         </Card>

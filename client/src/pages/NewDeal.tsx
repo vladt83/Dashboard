@@ -16,20 +16,18 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { toast } from "sonner";
-import { ArrowLeft, Loader2, UserCheck, DollarSign, Calendar, CheckCircle, Users, HelpCircle, CreditCard, ChevronDown, ShoppingBag, RefreshCw } from "lucide-react";
+import { ArrowLeft, Loader2, UserCheck, DollarSign, Calendar, CheckCircle, Users, HelpCircle, CreditCard, ChevronDown, ClipboardList, Phone, Sparkles, Pencil } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { format } from "date-fns";
 
-type EntryType = "" | "sale" | "subscription";
+// Single entry type: sales. Subscriptions were removed entirely.
 
 export default function NewDeal() {
   const [, navigate] = useLocation();
   const utils = trpc.useUtils();
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
-
-  // Entry type selector
-  const [entryType, setEntryType] = useState<EntryType>("");
 
   // Fetch team members (only needed for admin to pick a closer)
   const { data: closers } = trpc.team.getByRole.useQuery({ role: "closer" });
@@ -39,6 +37,15 @@ export default function NewDeal() {
   const { data: myTeamLink } = trpc.userTeam.getMyTeamMember.useQuery(undefined, {
     enabled: !isAdmin,
   });
+
+  // Pending bookings + pre-call preps assigned to ME (the closer). After
+  // picking a setter above, we filter these to that setter and let the
+  // closer click a row to auto-fill the client info — no double-typing
+  // names that the setter already captured.
+  const myBookings = trpc.bookedCalls.listAssignedToMe.useQuery();
+  const myPreps = trpc.vslPreps.listAssignedToMe.useQuery();
+  const updateBooking = trpc.bookedCalls.update.useMutation();
+  const updatePrep = trpc.vslPreps.update.useMutation();
 
   const today = format(new Date(), "yyyy-MM-dd");
   const now = new Date();
@@ -57,7 +64,6 @@ export default function NewDeal() {
     isNewClient: true,
     totalDealAmount: "",
     newCashCollected: "",
-    existingCashCollected: "",
     notes: "",
     paymentType: "" as "" | "full_pay" | "in_house_payment_plan" | "bnpl",
     paymentProcessor: "",
@@ -68,17 +74,18 @@ export default function NewDeal() {
     bnplFee: "",
   });
 
-  // Subscription form state
-  const [subForm, setSubForm] = useState({
-    clientName: "",
-    monthlyAmount: "",
-    closerId: "",
-    notes: "",
-  });
-
   const [submitted, setSubmitted] = useState(false);
   const [submittedName, setSubmittedName] = useState("");
-  const [submittedType, setSubmittedType] = useState<EntryType>("");
+
+  // Track which booking/prep was clicked-to-fill (so we can link it to the
+  // deal after creation, marking it "consumed" so it drops off the picker).
+  const [linkedSource, setLinkedSource] = useState<{
+    type: "booking" | "prep";
+    id: number;
+  } | null>(null);
+  // Once the closer starts editing the auto-filled name, show all pending
+  // sources again (they may have picked the wrong one).
+  const [manualEntry, setManualEntry] = useState(false);
 
   // Auto-assign closerId for non-admin users
   useEffect(() => {
@@ -87,38 +94,36 @@ export default function NewDeal() {
       if (!saleForm.closerId) {
         setSaleForm(prev => ({ ...prev, closerId: id }));
       }
-      if (!subForm.closerId) {
-        setSubForm(prev => ({ ...prev, closerId: id }));
-      }
     }
-  }, [isAdmin, myTeamLink, saleForm.closerId, subForm.closerId]);
+  }, [isAdmin, myTeamLink, saleForm.closerId]);
 
-  // Create deal mutation (for sales)
+  // Create deal mutation
   const createDeal = trpc.deals.create.useMutation({
-    onSuccess: () => {
+    onSuccess: async (deal) => {
+      // Link the source booking/prep to this deal so it drops off the
+      // pending picker. Best-effort — failure here doesn't break the deal.
+      if (linkedSource && deal?.id) {
+        try {
+          if (linkedSource.type === "booking") {
+            await updateBooking.mutateAsync({ id: linkedSource.id, dealId: deal.id });
+          } else {
+            await updatePrep.mutateAsync({ id: linkedSource.id, dealId: deal.id });
+          }
+        } catch (err) {
+          // Don't block the success flow on the link step
+          console.warn("[NewDeal] failed to link source to deal", err);
+        }
+      }
       setSubmittedName(saleForm.clientName);
-      setSubmittedType("sale");
       setSubmitted(true);
       utils.deals.getByMonth.invalidate();
       utils.stats.getMonthly.invalidate();
       utils.stats.getCloserLeaderboard.invalidate();
+      utils.bookedCalls.listAssignedToMe.invalidate();
+      utils.vslPreps.listAssignedToMe.invalidate();
     },
     onError: (error) => {
       toast.error(error.message || "Failed to record sale");
-    },
-  });
-
-  // Create subscription mutation
-  const createSubscription = trpc.subscriptions.create.useMutation({
-    onSuccess: () => {
-      setSubmittedName(subForm.clientName);
-      setSubmittedType("subscription");
-      setSubmitted(true);
-      utils.subscriptions.getAll.invalidate();
-      utils.subscriptions.getVerifications.invalidate();
-    },
-    onError: (error) => {
-      toast.error(error.message || "Failed to record subscription");
     },
   });
 
@@ -133,6 +138,9 @@ export default function NewDeal() {
       case "in_house_payment_plan":
         return [
           { value: "fanbasis", label: "Fanbasis" },
+          { value: "denefits", label: "Denefits" },
+          { value: "client_financing", label: "Client Financing" },
+          { value: "other", label: "Other" },
         ];
       case "bnpl":
         return [
@@ -197,7 +205,7 @@ export default function NewDeal() {
       isNewClient: saleForm.isNewClient,
       totalDealAmount: parseFloat(saleForm.totalDealAmount) || 0,
       newCashCollected: cashCollected,
-      existingCashCollected: parseFloat(saleForm.existingCashCollected) || 0,
+      existingCashCollected: 0,
       notes: saleForm.notes,
       paymentType: saleForm.paymentType || null,
       paymentProcessor: processor || null,
@@ -208,34 +216,6 @@ export default function NewDeal() {
     });
   };
 
-  const handleSubSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-
-    if (!subForm.clientName.trim()) {
-      toast.error("Please enter a client name");
-      return;
-    }
-
-    if (!subForm.monthlyAmount || parseFloat(subForm.monthlyAmount) <= 0) {
-      toast.error("Please enter a valid monthly amount");
-      return;
-    }
-
-    if (!subForm.closerId) {
-      toast.error(isAdmin ? "Please select a closer" : "Your account is not linked to a team member. Contact admin.");
-      return;
-    }
-
-    createSubscription.mutate({
-      clientName: subForm.clientName.trim(),
-      monthlyAmount: parseFloat(subForm.monthlyAmount),
-      closerId: parseInt(subForm.closerId),
-      startDate: today,
-      startMonth: now.getMonth() + 1,
-      startYear: now.getFullYear(),
-      notes: subForm.notes || undefined,
-    });
-  };
 
   const resetForm = () => {
     setSaleForm({
@@ -251,7 +231,6 @@ export default function NewDeal() {
       isNewClient: true,
       totalDealAmount: "",
       newCashCollected: "",
-      existingCashCollected: "",
       notes: "",
       paymentType: "",
       paymentProcessor: "",
@@ -261,23 +240,84 @@ export default function NewDeal() {
       monthlyPaymentAmount: "",
       bnplFee: "",
     });
-    setSubForm({
-      clientName: "",
-      monthlyAmount: "",
-      closerId: "",
-      notes: "",
-    });
     setSubmitted(false);
     setSubmittedName("");
-    setSubmittedType("");
-    setEntryType("");
+    setLinkedSource(null);
+    setManualEntry(false);
     // Re-assign closerId for non-admin
     if (!isAdmin && myTeamLink?.teamMember?.id) {
       const id = myTeamLink.teamMember!.id.toString();
       setSaleForm(prev => ({ ...prev, closerId: id }));
-      setSubForm(prev => ({ ...prev, closerId: id }));
     }
   };
+
+  // Pending sources filtered to the currently-picked setter, where dealId
+  // hasn't been set yet (i.e. "open" — not already converted).
+  const pendingSources = useMemo(() => {
+    const setterIdNum = saleForm.setterId ? parseInt(saleForm.setterId, 10) : null;
+    if (!setterIdNum) return [];
+    type Row = {
+      kind: "booking" | "prep";
+      id: number;
+      clientFirstName: string;
+      clientLastName: string;
+      phoneNumber: string;
+      email?: string | null;
+      bookedDate?: string;
+      vslBookedAt?: Date | string | null;
+      coachability?: string | null;
+    };
+    const out: Row[] = [];
+    for (const b of myBookings.data ?? []) {
+      if (b.dealId) continue;
+      if (b.setterId !== setterIdNum) continue;
+      out.push({
+        kind: "booking",
+        id: b.id,
+        clientFirstName: b.clientFirstName,
+        clientLastName: b.clientLastName,
+        phoneNumber: b.phoneNumber,
+        bookedDate: b.bookedDate,
+      });
+    }
+    for (const p of myPreps.data ?? []) {
+      if (p.dealId) continue;
+      if (p.setterId !== setterIdNum) continue;
+      out.push({
+        kind: "prep",
+        id: p.id,
+        clientFirstName: p.clientFirstName,
+        clientLastName: p.clientLastName,
+        phoneNumber: p.phoneNumber,
+        email: p.email,
+        vslBookedAt: p.vslBookedAt,
+        coachability: p.q4Coachability,
+      });
+    }
+    return out;
+  }, [saleForm.setterId, myBookings.data, myPreps.data]);
+
+  // Pick a pending source — auto-fills the client name and remembers which
+  // source so we can link it on submit.
+  const handlePickSource = (src: typeof pendingSources[number]) => {
+    setSaleForm(prev => ({
+      ...prev,
+      clientName: `${src.clientFirstName} ${src.clientLastName}`.trim(),
+    }));
+    setLinkedSource({ type: src.kind, id: src.id });
+    setManualEntry(false);
+  };
+
+  const clearLinkedSource = () => {
+    setLinkedSource(null);
+    setManualEntry(true);
+  };
+
+  const setterPickedName = useMemo(() => {
+    if (!saleForm.setterId) return null;
+    const s = setters?.find(x => x.id.toString() === saleForm.setterId);
+    return s?.name ?? null;
+  }, [saleForm.setterId, setters]);
 
   // Success screen
   if (submitted) {
@@ -289,19 +329,11 @@ export default function NewDeal() {
               <div className="h-16 w-16 rounded-full bg-primary/20 flex items-center justify-center mb-4">
                 <CheckCircle className="h-8 w-8 text-primary" />
               </div>
-              <h2 className="text-2xl font-bold mb-2">
-                {submittedType === "subscription" ? "Subscription Recorded!" : "Sale Recorded!"}
-              </h2>
+              <h2 className="text-2xl font-bold mb-2">Sale Recorded!</h2>
               <p className="text-muted-foreground mb-6">
-                {submittedName} has been successfully recorded
-                {submittedType === "subscription" ? " as a new subscription." : "."}
+                {submittedName} has been successfully recorded.
               </p>
-              {submittedType === "subscription" && (
-                <p className="text-sm text-[#c7ab77] mb-4">
-                  You'll earn 25% of the monthly amount as long as this subscriber stays active.
-                </p>
-              )}
-              {submittedType === "sale" && saleForm.paymentType === "in_house_payment_plan" && saleForm.paymentPlanMonths && (
+              {saleForm.paymentType === "in_house_payment_plan" && saleForm.paymentPlanMonths && (
                 <p className="text-sm text-[#c7ab77] mb-4">
                   Payment plan created: {saleForm.paymentPlanMonths} monthly payments of ${saleForm.monthlyPaymentAmount} will be tracked.
                 </p>
@@ -330,51 +362,12 @@ export default function NewDeal() {
         </Button>
         <div className="hidden md:block">
           <h1 className="text-2xl font-bold">New Entry</h1>
-          <p className="text-muted-foreground">Record a new sale or subscription</p>
+          <p className="text-muted-foreground">Record a new sale</p>
         </div>
       </div>
 
-      {/* Entry Type Selector */}
-      <Card className="border-[#c7ab77]/30">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-[#c7ab77]">
-            What are you recording?
-          </CardTitle>
-          <CardDescription>Choose the type of entry to show the correct fields</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-2 gap-4">
-            <div
-              className={`p-6 rounded-xl border-2 cursor-pointer transition-all text-center ${
-                entryType === "sale"
-                  ? "border-primary bg-primary/10 shadow-lg shadow-primary/10"
-                  : "border-border hover:border-primary/50 hover:bg-primary/5"
-              }`}
-              onClick={() => setEntryType("sale")}
-            >
-              <ShoppingBag className={`h-8 w-8 mx-auto mb-3 ${entryType === "sale" ? "text-primary" : "text-muted-foreground"}`} />
-              <div className="font-semibold text-lg mb-1">Sale</div>
-              <div className="text-xs text-muted-foreground">One-time deal or payment plan</div>
-            </div>
-            <div
-              className={`p-6 rounded-xl border-2 cursor-pointer transition-all text-center ${
-                entryType === "subscription"
-                  ? "border-primary bg-primary/10 shadow-lg shadow-primary/10"
-                  : "border-border hover:border-primary/50 hover:bg-primary/5"
-              }`}
-              onClick={() => setEntryType("subscription")}
-            >
-              <RefreshCw className={`h-8 w-8 mx-auto mb-3 ${entryType === "subscription" ? "text-primary" : "text-muted-foreground"}`} />
-              <div className="font-semibold text-lg mb-1">Subscription</div>
-              <div className="text-xs text-muted-foreground">Monthly recurring — 25% commission</div>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
       {/* ==================== SALE FORM ==================== */}
-      {entryType === "sale" && (
-        <form onSubmit={handleSaleSubmit} className="space-y-6">
+      <form onSubmit={handleSaleSubmit} className="space-y-6">
           {/* Instructions Card */}
           <Collapsible>
             <Card className="border-[#c7ab77]/30 bg-[#c7ab77]/5">
@@ -405,14 +398,175 @@ export default function NewDeal() {
             </Card>
           </Collapsible>
 
-          {/* Client Information */}
+          {/* Step 1 — Team Assignment. Pick the setter FIRST so we can
+              surface their pending bookings/preps in the next card. The
+              closer is auto-set to the signed-in user (or admin can pick). */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Users className="h-5 w-5 text-primary" />
+                Step 1 · Who set this call?
+              </CardTitle>
+              <CardDescription>Pick the setter first — we'll show their pending calls below.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <Label>Setter</Label>
+                <Select
+                  value={saleForm.setterId || "none"}
+                  onValueChange={(value) => {
+                    setSaleForm({ ...saleForm, setterId: value === "none" ? "" : value });
+                    // Switching setters voids any source we picked from the
+                    // previous setter's list.
+                    setLinkedSource(null);
+                    setManualEntry(false);
+                  }}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Pick setter (or self-generated lead)" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">Self-generated lead (no setter)</SelectItem>
+                    {setters?.map((setter) => (
+                      <SelectItem key={setter.id} value={setter.id.toString()}>
+                        {setter.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Kresha (Call Setting · text outreach) or Jake (Pre Call · VSL discovery).
+                  Pick them so commission attributes correctly.
+                </p>
+              </div>
+
+              {isAdmin ? (
+                <div className="space-y-2 pt-2 border-t border-border/40">
+                  <Label>Closer *</Label>
+                  <Select
+                    value={saleForm.closerId}
+                    onValueChange={(value) => setSaleForm({ ...saleForm, closerId: value })}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select closer" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {closers?.map((closer) => (
+                        <SelectItem key={closer.id} value={closer.id.toString()}>
+                          {closer.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground pt-2 border-t border-border/40">
+                  Recording as closer:{" "}
+                  <span className="text-foreground font-medium">
+                    {myTeamLink?.teamMember?.name || user?.name || "Loading..."}
+                  </span>
+                </p>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Step 2 — Pick from setter's pending calls (only when a setter
+              was picked above). Auto-fills client name on click. Closer can
+              skip this and type manually if the call wasn't pre-logged. */}
+          {saleForm.setterId && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <ClipboardList className="h-5 w-5 text-primary" />
+                  Step 2 · Pick from {setterPickedName ?? "their"} pending calls
+                </CardTitle>
+                <CardDescription>
+                  {pendingSources.length > 0
+                    ? "Click a row to auto-fill the client info — saves you re-typing what they already captured."
+                    : "Nothing pending from this setter assigned to you. Type the client info manually below."}
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {linkedSource && !manualEntry ? (
+                  <div className="rounded-lg border border-primary/40 bg-primary/5 p-3 flex items-center gap-3">
+                    <Sparkles className="h-4 w-4 text-primary shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-semibold">
+                        Auto-filled from {linkedSource.type === "booking" ? "Call Setting booking" : "Pre Call prep"} ·
+                        will be linked to this deal on save.
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={clearLinkedSource}
+                    >
+                      <Pencil className="h-3.5 w-3.5 mr-1" />
+                      Edit / pick different
+                    </Button>
+                  </div>
+                ) : pendingSources.length === 0 ? (
+                  <p className="text-sm text-muted-foreground py-2">
+                    No pending {setterPickedName} calls assigned to you. The form below works fine — type the client info manually.
+                  </p>
+                ) : (
+                  <div className="divide-y divide-border/30 -mx-2">
+                    {pendingSources.map(src => (
+                      <button
+                        key={`${src.kind}:${src.id}`}
+                        type="button"
+                        onClick={() => handlePickSource(src)}
+                        className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-secondary/40 rounded-md transition-colors text-left"
+                      >
+                        <Badge
+                          variant="outline"
+                          className={src.kind === "prep"
+                            ? "bg-purple-500/10 text-purple-300 border-purple-500/30 h-5"
+                            : "bg-blue-500/10 text-blue-300 border-blue-500/30 h-5"}
+                        >
+                          {src.kind === "prep" ? "Pre Call" : "Call Setting"}
+                        </Badge>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-semibold truncate">
+                            {src.clientFirstName} {src.clientLastName}
+                          </p>
+                          <div className="flex items-center gap-3 text-xs text-muted-foreground mt-0.5">
+                            <span className="flex items-center gap-1">
+                              <Phone className="h-3 w-3" />
+                              {src.phoneNumber}
+                            </span>
+                            {src.kind === "booking" && src.bookedDate && (
+                              <span>booked {src.bookedDate}</span>
+                            )}
+                            {src.kind === "prep" && src.coachability && (
+                              <span className="truncate max-w-xs">
+                                "{src.coachability.length > 60 ? src.coachability.slice(0, 60) + "…" : src.coachability}"
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Step 3 — Client info. Either auto-filled from above, or typed
+              manually. */}
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <UserCheck className="h-5 w-5 text-primary" />
-                Client Information
+                {saleForm.setterId ? "Step 3 · Client info" : "Client info"}
               </CardTitle>
-              <CardDescription>Basic details about the client</CardDescription>
+              <CardDescription>
+                {linkedSource && !manualEntry
+                  ? "Auto-filled from the picker above. Edit if anything's wrong."
+                  : "Basic details about the client."}
+              </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -437,72 +591,6 @@ export default function NewDeal() {
                     required
                   />
                 </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Team Assignment - admin sees closer dropdown; everyone sees setter picker */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Users className="h-5 w-5 text-primary" />
-                Team Assignment
-              </CardTitle>
-              <CardDescription>Who handled this call?</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {isAdmin ? (
-                <div className="space-y-2">
-                  <Label>Closer *</Label>
-                  <Select
-                    value={saleForm.closerId}
-                    onValueChange={(value) => setSaleForm({ ...saleForm, closerId: value })}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select closer" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {closers?.map((closer) => (
-                        <SelectItem key={closer.id} value={closer.id.toString()}>
-                          {closer.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              ) : (
-                <p className="text-sm text-muted-foreground">
-                  Recording as:{" "}
-                  <span className="text-foreground font-medium">
-                    {myTeamLink?.teamMember?.name || user?.name || "Loading..."}
-                  </span>
-                </p>
-              )}
-
-              <div className="space-y-2">
-                <Label>Setter (who booked this call)</Label>
-                <Select
-                  value={saleForm.setterId || "none"}
-                  onValueChange={(value) =>
-                    setSaleForm({ ...saleForm, setterId: value === "none" ? "" : value })
-                  }
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Self-generated lead (no setter)" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="none">Self-generated lead (no setter)</SelectItem>
-                    {setters?.map((setter) => (
-                      <SelectItem key={setter.id} value={setter.id.toString()}>
-                        {setter.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">
-                  If a setter booked this call from a text outreach, pick her here so commission attributes correctly.
-                  Setter commission (3%) applies to one-time sales only — subscriptions never pay setter commission.
-                </p>
               </div>
             </CardContent>
           </Card>
@@ -624,7 +712,7 @@ export default function NewDeal() {
                     onClick={() => setSaleForm({ ...saleForm, paymentType: "in_house_payment_plan", paymentProcessor: "", bnplFee: "" })}
                   >
                     <div className="font-medium mb-1">In-House Plan</div>
-                    <div className="text-xs text-muted-foreground">Fanbasis — down + monthly</div>
+                    <div className="text-xs text-muted-foreground">Fanbasis / Denefits / Client Financing — down + monthly · 9% commission</div>
                   </div>
                   <div
                     className={`p-4 rounded-lg border-2 cursor-pointer transition-all ${
@@ -689,7 +777,7 @@ export default function NewDeal() {
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="space-y-2">
-                  <Label htmlFor="totalDealAmount">Total Deal Amount *</Label>
+                  <Label htmlFor="totalDealAmount">Amount Charged to Client (Total Revenue) *</Label>
                   <div className="relative">
                     <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                     <Input
@@ -702,8 +790,8 @@ export default function NewDeal() {
                         const total = parseFloat(e.target.value) || 0;
                         const down = parseFloat(saleForm.downPayment) || 0;
                         const months = parseInt(saleForm.paymentPlanMonths) || 0;
-                        const calculatedMonthly = (saleForm.paymentType === "in_house_payment_plan" && months > 0) 
-                          ? ((total - down) / months).toFixed(2) 
+                        const calculatedMonthly = (saleForm.paymentType === "in_house_payment_plan" && months > 0)
+                          ? ((total - down) / months).toFixed(2)
                           : saleForm.monthlyPaymentAmount;
                         setSaleForm({ ...saleForm, totalDealAmount: e.target.value, monthlyPaymentAmount: calculatedMonthly });
                       }}
@@ -712,12 +800,15 @@ export default function NewDeal() {
                       required
                     />
                   </div>
+                  <p className="text-xs text-muted-foreground">
+                    The full price you quoted the client — what we'd love them to pay total. Cash, financed, and fees are tracked separately below.
+                  </p>
                 </div>
 
                 {/* Pay In Full fields */}
                 {saleForm.paymentType === "full_pay" && (
                   <div className="space-y-2">
-                    <Label htmlFor="newCashCollected">Cash Collected *</Label>
+                    <Label htmlFor="newCashCollected">Actual Cash Collected Today *</Label>
                     <div className="relative">
                       <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                       <Input
@@ -732,6 +823,9 @@ export default function NewDeal() {
                         required
                       />
                     </div>
+                    <p className="text-xs text-muted-foreground">
+                      What actually hit the account today. For full pay, usually equals the amount charged.
+                    </p>
                   </div>
                 )}
 
@@ -739,7 +833,7 @@ export default function NewDeal() {
                 {saleForm.paymentType === "in_house_payment_plan" && (
                   <>
                     <div className="space-y-2">
-                      <Label htmlFor="downPayment">Down Payment (Cash Collected Now) *</Label>
+                      <Label htmlFor="downPayment">Actual Cash Collected Today (Down Payment) *</Label>
                       <div className="relative">
                         <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                         <Input
@@ -801,20 +895,29 @@ export default function NewDeal() {
                         <p className="text-xs text-muted-foreground">Auto-calculated, but editable if needed</p>
                       </div>
                     </div>
-                    <div className="p-3 rounded-lg bg-[#c7ab77]/10 border border-[#c7ab77]/20 text-sm">
-                      <strong>Payment Plan Summary:</strong> Client will pay ${saleForm.monthlyPaymentAmount || "0"}/month for {saleForm.paymentPlanMonths || "0"} months.
-                      These payments will be tracked and you'll be reminded to collect each month.
-                      Commission is paid only when each payment is collected.
-                    </div>
                   </>
                 )}
 
                 {/* BNPL fields */}
                 {saleForm.paymentType === "bnpl" && (
                   <>
+                    {/* Quick visual reference of the quoted amount from above */}
+                    <div className="rounded-md border border-border/40 bg-secondary/30 px-3 py-2 text-sm flex items-center justify-between">
+                      <span className="text-muted-foreground">Total Price Quoted</span>
+                      <span className="font-semibold text-foreground">
+                        {(() => {
+                          const v = parseFloat(saleForm.totalDealAmount) || 0;
+                          return v.toLocaleString("en-US", {
+                            style: "currency", currency: "USD",
+                            minimumFractionDigits: 2, maximumFractionDigits: 2,
+                          });
+                        })()}
+                      </span>
+                    </div>
+
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       <div className="space-y-2">
-                        <Label htmlFor="newCashCollected">Total Amount from BNPL *</Label>
+                        <Label htmlFor="newCashCollected">Charged via BNPL *</Label>
                         <div className="relative">
                           <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                           <Input
@@ -829,9 +932,12 @@ export default function NewDeal() {
                             required
                           />
                         </div>
+                        <p className="text-xs text-muted-foreground">
+                          What the BNPL provider actually charged the client (gross, before their fee). Often equals the price quoted, but can be lower if BNPL only approved part of it.
+                        </p>
                       </div>
                       <div className="space-y-2">
-                        <Label htmlFor="bnplFee">BNPL Provider Fee *</Label>
+                        <Label htmlFor="bnplFee">BNPL Fee *</Label>
                         <div className="relative">
                           <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                           <Input
@@ -846,34 +952,100 @@ export default function NewDeal() {
                             required
                           />
                         </div>
+                        <p className="text-xs text-muted-foreground">
+                          The cut taken by the BNPL provider (Climb / ClarityPay / HFD / Elective / Split-It).
+                        </p>
                       </div>
                     </div>
-                    <div className="p-3 rounded-lg bg-[#c7ab77]/10 border border-[#c7ab77]/20 text-sm">
-                      <strong>Net Cash Collected:</strong> ${((parseFloat(saleForm.newCashCollected) || 0) - (parseFloat(saleForm.bnplFee) || 0)).toFixed(2)}
-                      <br />
-                      <span className="text-muted-foreground">Commission is calculated on this net amount (after BNPL fee)</span>
-                    </div>
+
+                    {/* Auto-calculated cash collected — read-only display */}
+                    {(() => {
+                      const charged = parseFloat(saleForm.newCashCollected) || 0;
+                      const fee = parseFloat(saleForm.bnplFee) || 0;
+                      const net = Math.max(0, charged - fee);
+                      const fmt = (n: number) =>
+                        n.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                      return (
+                        <div className="rounded-md border-2 border-primary/40 bg-primary/5 p-3 flex items-center justify-between">
+                          <div>
+                            <p className="text-xs uppercase tracking-wider text-primary font-bold">
+                              Cash Collected (auto-calculated)
+                            </p>
+                            <p className="text-xs text-muted-foreground mt-0.5">
+                              Charged via BNPL − BNPL Fee = what TF actually receives
+                            </p>
+                          </div>
+                          <span className="text-2xl font-bold text-primary">{fmt(net)}</span>
+                        </div>
+                      );
+                    })()}
                   </>
                 )}
 
-                {/* Existing client cash */}
-                <div className="space-y-2">
-                  <Label htmlFor="existingCashCollected">Existing Client Cash Collected</Label>
-                  <div className="relative">
-                    <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                    <Input
-                      id="existingCashCollected"
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      value={saleForm.existingCashCollected}
-                      onChange={(e) => setSaleForm({ ...saleForm, existingCashCollected: e.target.value })}
-                      placeholder="0.00"
-                      className="pl-9"
-                    />
-                  </div>
-                  <p className="text-xs text-muted-foreground">For returning clients with additional purchases</p>
-                </div>
+                {/* ─────── Unified Deal Breakdown — what gets saved ─────── */}
+                {(() => {
+                  const charged = parseFloat(saleForm.totalDealAmount) || 0;
+                  const fee = parseFloat(saleForm.bnplFee) || 0;
+                  const grossEntry = parseFloat(saleForm.newCashCollected) || 0;
+                  const down = parseFloat(saleForm.downPayment) || 0;
+                  const monthly = parseFloat(saleForm.monthlyPaymentAmount) || 0;
+                  const months = parseInt(saleForm.paymentPlanMonths) || 0;
+
+                  let cashToday = 0;
+                  let financedFuture = 0;
+                  let bnplFeeShown = 0;
+                  if (saleForm.paymentType === "full_pay") {
+                    cashToday = grossEntry;
+                  } else if (saleForm.paymentType === "in_house_payment_plan") {
+                    cashToday = down;
+                    financedFuture = Math.max(0, charged - down);
+                  } else if (saleForm.paymentType === "bnpl") {
+                    cashToday = grossEntry - fee;
+                    bnplFeeShown = fee;
+                  }
+
+                  const fmt = (n: number) =>
+                    n.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+                  return (
+                    <div className="rounded-lg border border-[#c7ab77]/40 bg-[#c7ab77]/5 p-4 space-y-2">
+                      <p className="text-xs uppercase tracking-wider text-[#c7ab77] font-bold">
+                        Deal Breakdown — what gets saved
+                      </p>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-1 text-sm">
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Charged to client (revenue)</span>
+                          <span className="font-semibold">{fmt(charged)}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Cash collected today</span>
+                          <span className="font-semibold text-[#c7ab77]">{fmt(cashToday)}</span>
+                        </div>
+                        {saleForm.paymentType === "in_house_payment_plan" && (
+                          <>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Financed (collect later)</span>
+                              <span className="font-semibold text-blue-400">{fmt(financedFuture)}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">{months || 0} × monthly</span>
+                              <span className="font-semibold">{fmt(monthly)}/mo</span>
+                            </div>
+                          </>
+                        )}
+                        {saleForm.paymentType === "bnpl" && (
+                          <div className="flex justify-between">
+                            <span className="text-muted-foreground">BNPL fee absorbed</span>
+                            <span className="font-semibold text-red-400">{fmt(bnplFeeShown)}</span>
+                          </div>
+                        )}
+                      </div>
+                      <p className="text-xs text-muted-foreground pt-1 border-t border-[#c7ab77]/20">
+                        These three numbers — Charged, Collected, Fees — feed the Dashboard chart and Sales Tracker. Be honest, be exact.
+                      </p>
+                    </div>
+                  );
+                })()}
               </CardContent>
             </Card>
           )}
@@ -899,10 +1071,10 @@ export default function NewDeal() {
             <Button
               type="button"
               variant="outline"
-              onClick={() => setEntryType("")}
+              onClick={() => navigate("/")}
               className="flex-1"
             >
-              Back
+              Cancel
             </Button>
             <Button
               type="submit"
@@ -920,146 +1092,6 @@ export default function NewDeal() {
             </Button>
           </div>
         </form>
-      )}
-
-      {/* ==================== SUBSCRIPTION FORM ==================== */}
-      {entryType === "subscription" && (
-        <form onSubmit={handleSubSubmit} className="space-y-6">
-          {/* Info banner */}
-          <Card className="border-[#c7ab77]/30 bg-[#c7ab77]/5">
-            <CardContent className="pt-6">
-              <div className="flex items-start gap-3">
-                <RefreshCw className="h-5 w-5 text-[#c7ab77] mt-0.5 shrink-0" />
-                <div className="text-sm text-zinc-300">
-                  <p className="font-medium text-[#c7ab77] mb-1">Subscription Commission</p>
-                  <p>You earn <strong>25%</strong> of the monthly subscription amount as long as the subscriber stays active. Ariana verifies each month that the subscriber is still in the group.</p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Client & Amount */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <UserCheck className="h-5 w-5 text-primary" />
-                Subscription Details
-              </CardTitle>
-              <CardDescription>Who is subscribing and how much?</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor="subClientName">Client Name *</Label>
-                <Input
-                  id="subClientName"
-                  value={subForm.clientName}
-                  onChange={(e) => setSubForm({ ...subForm, clientName: e.target.value })}
-                  placeholder="Enter subscriber name"
-                  autoFocus
-                  required
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="monthlyAmount">Monthly Amount *</Label>
-                <div className="relative">
-                  <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                  <Input
-                    id="monthlyAmount"
-                    type="number"
-                    step="0.01"
-                    min="0.01"
-                    value={subForm.monthlyAmount}
-                    onChange={(e) => setSubForm({ ...subForm, monthlyAmount: e.target.value })}
-                    placeholder="0.00"
-                    className="pl-9"
-                    required
-                  />
-                </div>
-                {subForm.monthlyAmount && parseFloat(subForm.monthlyAmount) > 0 && (
-                  <p className="text-xs text-[#c7ab77]">
-                    Your monthly commission: ${(parseFloat(subForm.monthlyAmount) * 0.25).toFixed(2)}/month
-                  </p>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Team Assignment for admin */}
-          {isAdmin && (
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Users className="h-5 w-5 text-primary" />
-                  Closer Assignment
-                </CardTitle>
-                <CardDescription>Who signed up this subscriber?</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-2">
-                  <Label>Closer *</Label>
-                  <Select
-                    value={subForm.closerId}
-                    onValueChange={(value) => setSubForm({ ...subForm, closerId: value })}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select closer" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {closers?.map((closer) => (
-                        <SelectItem key={closer.id} value={closer.id.toString()}>
-                          {closer.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </CardContent>
-            </Card>
-          )}
-
-          {/* Notes */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Notes</CardTitle>
-              <CardDescription>Any additional information</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Textarea
-                value={subForm.notes}
-                onChange={(e) => setSubForm({ ...subForm, notes: e.target.value })}
-                placeholder="Add any notes about this subscription..."
-                rows={3}
-              />
-            </CardContent>
-          </Card>
-
-          {/* Submit */}
-          <div className="flex gap-3">
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setEntryType("")}
-              className="flex-1"
-            >
-              Back
-            </Button>
-            <Button
-              type="submit"
-              disabled={createSubscription.isPending}
-              className="flex-1 bg-primary hover:bg-primary/90"
-            >
-              {createSubscription.isPending ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Recording...
-                </>
-              ) : (
-                "Record Subscription"
-              )}
-            </Button>
-          </div>
-        </form>
-      )}
     </div>
   );
 }

@@ -5,6 +5,19 @@ import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import bcrypt from "bcryptjs";
+import { eq } from "drizzle-orm";
+
+/**
+ * Parse a 'YYYY-MM-DD' date string into year + month components without
+ * timezone interpretation. `new Date("2026-04-01")` parses as UTC midnight
+ * and `.getMonth()` then converts to local time — so an April 1 entry in
+ * any timezone west of UTC silently becomes March 31. This helper avoids
+ * that whole class of bug by reading the string directly.
+ */
+function parseYearMonth(dateStr: string): { year: number; month: number } {
+  const [y, m] = dateStr.split("-");
+  return { year: parseInt(y, 10), month: parseInt(m, 10) };
+}
 import {
   createDeal,
   updateDeal,
@@ -34,6 +47,7 @@ import {
 
   getAvailableMonths,
   calculateCloserCommission,
+  effectiveCloserRate,
 
   seedInitialData,
   createAdjustment,
@@ -59,7 +73,17 @@ import {
   getSetterPayouts,
   SETTER_CAP,
   SETTER_RATE,
+  getSetterCap,
+  getSetterRate,
+  applySetterCap,
   getDealsBySetter,
+  createVslCallPrep,
+  getVslCallPrepById,
+  getVslCallPrepsBySetter,
+  getVslCallPrepsByCloser,
+  getAllVslCallPreps,
+  updateVslCallPrep,
+  deleteVslCallPrep,
   getSalesMonthlyByCloser,
   getSalesDailyByCloser,
   getUserByEmail,
@@ -104,20 +128,36 @@ import {
   getCompanyPerformance,
   getSalesTeamBreakdown,
   getPayrollOverview,
-  createSubscription,
-  getActiveSubscriptions,
-  getAllSubscriptions,
-  getSubscriptionsByCloser,
-  cancelSubscription,
-  reactivateSubscription,
-  generateMonthlyVerifications,
-  getVerificationsByMonth,
-  verifySubscription,
-  unverifySubscription,
-  markSubscriptionCancelled,
-  getSubscriptionCommissionsByCloser,
-  getRandomSubscriptionsForAudit,
   getPayeeByUserId,
+  getDealOnboarding,
+  upsertDealOnboarding,
+  markDealOnboardingComplete,
+  reopenDealOnboarding,
+  getPendingOnboardings,
+  getRecentlyOnboarded,
+  getClientProfile,
+  computeProgramTimeline,
+  getExtensionAlertsForDeal,
+  setExtensionStatus,
+  runExtensionReminders,
+  getUpcomingExtensions,
+  createClientLogin,
+  createTradingLog,
+  getTradingLogByClientUserId,
+  getTradingLogByDealId,
+  getTradingLogById,
+  getClientDirectory,
+  createLoginToken,
+  consumeLoginToken,
+  addTradeEntry,
+  updateTradeEntry,
+  deleteTradeEntry,
+  getTradeEntry,
+  getTradeEntriesForLog,
+  getTradingLogStats,
+  getTradingLogsForCoach,
+  updateTradingLog,
+  getDb,
 } from "./db";
 
 // Admin-only procedure
@@ -127,6 +167,141 @@ const adminProcedure = protectedProcedure.use(({ ctx, next }) => {
   }
   return next({ ctx });
 });
+
+/**
+ * Notify a coach (via email) that they've been assigned a new client.
+ * Idempotent — only fires once per (dealId, coachPayeeId) pair thanks to
+ * the dedupeKey unique index on emailLog.
+ *
+ * Looks up the coach's user account by matching payee.name → user.name.
+ * Falls back gracefully if the coach has no user (logs to emailLog as
+ * 'failed' with a clear reason).
+ */
+async function notifyCoachOfAssignment(input: {
+  dealId: number;
+  coachPayeeId: number;
+  triggeredByUserId: number;
+  triggeredByName?: string;
+}): Promise<void> {
+  const { sendEmail } = await import("./email");
+
+  const deal = await getDealById(input.dealId);
+  if (!deal) return;
+
+  // Look up the coach payee + their user (by name match — coaches don't
+  // have a direct payee→user link in the current schema).
+  const db = await getDb();
+  if (!db) return;
+  const { payees, users } = await import("../drizzle/schema");
+  const [coach] = await db.select().from(payees).where(eq(payees.id, input.coachPayeeId));
+  if (!coach) return;
+  const [coachUser] = await db.select({
+    id: users.id, email: users.email, name: users.name,
+  }).from(users).where(eq(users.name, coach.name));
+
+  if (!coachUser?.email) {
+    // No user account for this coach yet — log it via emailLog so admin can see.
+    await sendEmail({
+      to: { email: `unknown-coach-${input.coachPayeeId}@invalid`, name: coach.name },
+      subject: `Coach assignment skipped — no user for ${coach.name}`,
+      text: `Tried to email coach ${coach.name} (payee #${input.coachPayeeId}) about new client assignment for ${deal.clientName}, but no matching user account was found.`,
+      dedupeKey: `coach_assignment_skip:${input.dealId}:${input.coachPayeeId}`,
+      relatedDealId: input.dealId,
+      triggeredByUserId: input.triggeredByUserId,
+    });
+    return;
+  }
+
+  const fromName = input.triggeredByName
+    ? `${input.triggeredByName} via Trader Foundation`
+    : "Trader Foundation";
+  const profileUrl = `${process.env.APP_URL || "http://localhost:3000"}/clients/${input.dealId}`;
+
+  const subject = `New client assigned to you: ${deal.clientName}`;
+  const text = [
+    `Hi ${coachUser.name?.split(" ")[0] ?? coach.name},`,
+    "",
+    `${input.triggeredByName ?? "Ariana"} just assigned ${deal.clientName} to you. They're ready for their first coaching session.`,
+    "",
+    "Everything you need is on their Client Profile in your dashboard:",
+    "  • Trading log + program timeline",
+    "  • Coaching session history",
+    "  • Onboarding checklist (so you know what's been covered)",
+    "",
+    `Open profile: ${profileUrl}`,
+    "",
+    "Reply to this email if anything's missing.",
+    "",
+    "— Trader Foundation",
+  ].join("\n");
+
+  const html = `
+<!DOCTYPE html>
+<html>
+<body style="margin:0; padding:24px; background:#0a0a0a; color:#cfcfcf; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">
+  <div style="max-width:560px; margin:0 auto; background:#161616; border:1px solid #2a2620; border-radius:12px; padding:32px;">
+    <p style="color:#c7ab77; font-size:11px; text-transform:uppercase; letter-spacing:2px; margin:0 0 8px 0;">Trader Foundation</p>
+    <h1 style="color:#c7ab77; font-size:22px; margin:0 0 16px 0;">New client assigned to you</h1>
+    <p style="margin:0 0 16px 0; line-height:1.6;">Hi ${coachUser.name?.split(" ")[0] ?? coach.name},</p>
+    <p style="margin:0 0 16px 0; line-height:1.6;">
+      <strong style="color:#fff;">${input.triggeredByName ?? "Ariana"}</strong> just assigned
+      <strong style="color:#fff;">${deal.clientName}</strong> to you. They're ready for their first coaching session.
+    </p>
+    <p style="margin:0 0 8px 0; line-height:1.6;">Everything you need is on their Client Profile in your dashboard:</p>
+    <ul style="margin:0 0 24px 0; padding-left:20px; line-height:1.8;">
+      <li>Trading log + program timeline</li>
+      <li>Coaching session history</li>
+      <li>Onboarding checklist (so you know what's been covered)</li>
+    </ul>
+    <a href="${profileUrl}" style="display:inline-block; background:#c7ab77; color:#0a0a0a; text-decoration:none; font-weight:600; padding:12px 24px; border-radius:8px; margin-bottom:24px;">
+      Open ${deal.clientName}'s profile →
+    </a>
+    <p style="margin:24px 0 0 0; padding-top:16px; border-top:1px solid #2a2620; font-size:12px; color:#8a8a8a; line-height:1.6;">
+      Reply to this email if anything's missing.<br/>
+      — Trader Foundation
+    </p>
+  </div>
+</body>
+</html>`.trim();
+
+  await sendEmail({
+    to: { email: coachUser.email, name: coachUser.name ?? coach.name },
+    from: { email: process.env.EMAIL_FROM_ADDRESS || "noreply@traderfoundation.com",
+            name: fromName },
+    replyTo: "ariana@traderfoundation.com",
+    subject,
+    text,
+    html,
+    dedupeKey: `coach_assignment:${input.dealId}:${input.coachPayeeId}`,
+    relatedDealId: input.dealId,
+    relatedUserId: coachUser.id,
+    triggeredByUserId: input.triggeredByUserId,
+  });
+}
+
+/**
+ * Throws FORBIDDEN unless the caller can write to the given trading log.
+ * Write access:
+ *   - admin / payroll: any log
+ *   - client:          only their own log
+ *   - everyone else:   no
+ * Coaches can read a log but not write.
+ */
+async function assertCanWriteToLog(
+  userId: number,
+  role: string,
+  tradingLogId: number,
+): Promise<void> {
+  if (role === "admin" || role === "payroll") return;
+  if (role === "client") {
+    const log = await getTradingLogById(tradingLogId);
+    if (log?.clientUserId !== userId) {
+      throw new TRPCError({ code: "FORBIDDEN", message: "Not your log." });
+    }
+    return;
+  }
+  throw new TRPCError({ code: "FORBIDDEN", message: "Read-only role." });
+}
 
 // Payroll procedure - allows admin and payroll roles
 const payrollProcedure = protectedProcedure.use(({ ctx, next }) => {
@@ -277,8 +452,108 @@ export const appRouter = router({
         if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
         
         await db.update(users).set({ passwordHash: newHash, updatedAt: new Date() }).where(eq(users.id, ctx.user.id));
-        
+
         return { success: true };
+      }),
+
+    /**
+     * Request a magic-link sign-in. Anyone can call this; we don't leak
+     * whether an email exists by always returning success. If the email
+     * resolves to a real user, we email them a one-time link that expires
+     * in 30 minutes.
+     *
+     * Primary auth path for clients (no password required) — but staff can
+     * use it too as an alternative to typing a password.
+     */
+    requestMagicLink: publicProcedure
+      .input(z.object({ email: z.string().email() }))
+      .mutation(async ({ input }) => {
+        const user = await getUserByEmail(input.email.toLowerCase());
+        // Always return success — don't leak account existence.
+        if (!user) {
+          return {
+            ok: true,
+            message: "If that email matches an account, a sign-in link is on the way.",
+            devLink: null as string | null,
+          };
+        }
+        const { token } = await createLoginToken({
+          userId: user.id,
+          reason: "login_request",
+        });
+        const appUrl = process.env.APP_URL || "http://localhost:3000";
+        const link = `${appUrl}/login/magic?token=${token}`;
+        // In dev (no email provider configured) return the link so the
+        // user can click straight through without fishing tokens out of
+        // the DB. In prod, RESEND_API_KEY is set and devLink stays null.
+        const devLink = process.env.RESEND_API_KEY ? null : link;
+        const firstName = user.name?.split(" ")[0] ?? "there";
+        const { sendEmail } = await import("./email");
+        await sendEmail({
+          to: { email: user.email, name: user.name ?? undefined },
+          subject: "Your Trader Foundation sign-in link",
+          text: [
+            `Hi ${firstName},`,
+            "",
+            "Click this link to sign in to your Trader Foundation dashboard:",
+            link,
+            "",
+            "Link expires in 30 minutes. If you didn't request this, just ignore the email.",
+            "",
+            "— Trader Foundation",
+          ].join("\n"),
+          html: `
+<!DOCTYPE html>
+<html>
+<body style="margin:0; padding:24px; background:#0a0a0a; color:#cfcfcf; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">
+  <div style="max-width:480px; margin:0 auto; background:#161616; border:1px solid #2a2620; border-radius:12px; padding:32px;">
+    <p style="color:#c7ab77; font-size:11px; text-transform:uppercase; letter-spacing:2px; margin:0 0 8px 0;">Trader Foundation</p>
+    <h1 style="color:#c7ab77; font-size:22px; margin:0 0 16px 0;">Your sign-in link</h1>
+    <p style="margin:0 0 16px 0; line-height:1.6;">Hi ${firstName},</p>
+    <p style="margin:0 0 24px 0; line-height:1.6;">Tap the button below to sign in to your Trader Foundation dashboard. No password needed.</p>
+    <a href="${link}" style="display:inline-block; background:#c7ab77; color:#0a0a0a; text-decoration:none; font-weight:600; padding:14px 28px; border-radius:8px;">Sign in →</a>
+    <p style="margin:24px 0 8px 0; font-size:12px; color:#8a8a8a; line-height:1.6;">
+      Or copy this URL into your browser:<br/>
+      <span style="color:#c7ab77; word-break:break-all;">${link}</span>
+    </p>
+    <p style="margin:24px 0 0 0; padding-top:16px; border-top:1px solid #2a2620; font-size:12px; color:#8a8a8a; line-height:1.6;">
+      Link expires in 30 minutes. If you didn't request this, just ignore the email.
+    </p>
+  </div>
+</body>
+</html>`.trim(),
+          relatedUserId: user.id,
+        });
+        return {
+          ok: true,
+          message: "Sign-in link sent. Check your email.",
+          devLink,
+        };
+      }),
+
+    /**
+     * Consume a magic-link token. On success, sets the session cookie and
+     * returns the signed-in user. On failure, returns ok=false with a reason
+     * the UI can show (expired / already used / unknown).
+     */
+    consumeMagicLink: publicProcedure
+      .input(z.object({ token: z.string().min(10) }))
+      .mutation(async ({ input, ctx }) => {
+        const user = await consumeLoginToken(input.token);
+        if (!user) {
+          return { ok: false as const, reason: "This sign-in link is expired or already used. Request a new one." };
+        }
+        const { createSessionToken } = await import("./_core/auth");
+        const sessionToken = await createSessionToken(user.openId || `user-${user.id}`, {
+          name: user.name || "",
+          expiresInMs: 365 * 24 * 60 * 60 * 1000,
+        });
+        const cookieOptions = getSessionCookieOptions(ctx.req);
+        ctx.res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: 365 * 24 * 60 * 60 * 1000 });
+        return {
+          ok: true as const,
+          user: { id: user.id, email: user.email, name: user.name, role: user.role },
+        };
       }),
   }),
   
@@ -437,24 +712,34 @@ export const appRouter = router({
         paymentPlanMonths: z.number().nullable().optional(),
         monthlyPaymentAmount: z.number().nullable().optional(),
         bnplFee: z.number().nullable().optional(),
+        docusignSigned: z.boolean().default(false),
       }))
       .mutation(async ({ input }) => {
-        // Get date parts for commission rate lookup
-        const dealDate = new Date(input.dealDate);
-        const year = dealDate.getFullYear();
-        const month = dealDate.getMonth() + 1;
-        
-        // Calculate closer commission
-        const closerRate = await getCommissionRate(input.closerId, year, month);
-        const closerRateValue = closerRate ? parseFloat(closerRate.rate) : 0.10;
-        const totalCash = input.newCashCollected + input.existingCashCollected;
-        const closerCommission = input.closed ? calculateCloserCommission(totalCash, closerRateValue) : 0;
+        // Get date parts for commission rate lookup (no timezone games)
+        const { year, month } = parseYearMonth(input.dealDate);
 
-        // Setter commission: 3% of cash collected, capped at $6,000 cash per deal.
-        // Only applied when this deal closed AND a setter is attributed.
-        const setterCashCommission = (input.closed && input.setterId)
-          ? Math.min(totalCash, SETTER_CAP) * SETTER_RATE
-          : 0;
+        // DocuSign gate: until the contract is signed, no commission is
+        // calculated for closer or setter. Once docusignSigned flips true,
+        // the next update recalculates.
+        const eligibleForCommission = input.closed && input.docusignSigned;
+
+        // Calculate closer commission. In-house payment plans get the
+        // 9% fee-offset rate; other deals use the time-based rate.
+        const closerRate = await getCommissionRate(input.closerId, year, month);
+        const fallbackRate = closerRate ? parseFloat(closerRate.rate) : 0.10;
+        const closerRateValue = effectiveCloserRate(input.paymentType, fallbackRate);
+        const totalCash = input.newCashCollected + input.existingCashCollected;
+        const closerCommission = eligibleForCommission ? calculateCloserCommission(totalCash, closerRateValue) : 0;
+
+        // Setter commission: per-setter rate (Kresha 3%, Jake 2%) of cash
+        // collected, with per-setter cap. Setters never take the in-house 9%
+        // haircut closers do — they always earn their full rate.
+        let setterCashCommission = 0;
+        if (eligibleForCommission && input.setterId) {
+          const setterCap = await getSetterCap(input.setterId);
+          const setterRate = await getSetterRate(input.setterId);
+          setterCashCommission = applySetterCap(totalCash, setterCap) * setterRate;
+        }
 
         // Create the deal
         const deal = await createDeal({
@@ -483,6 +768,7 @@ export const appRouter = router({
           totalMonths: input.paymentPlanMonths || 0,
           monthlyAmount: input.monthlyPaymentAmount?.toFixed(2) || "0",
           bnplFee: input.bnplFee?.toFixed(2) || "0",
+          docusignSigned: input.docusignSigned,
         });
         
         // If this is a payment plan, create the first monthly payment entry
@@ -500,7 +786,7 @@ export const appRouter = router({
         return deal;
       }),
 
-    // Update a deal
+    // Update a deal — closers can edit their own entries; admins can edit any.
     update: protectedProcedure
       .input(z.object({
         id: z.number(),
@@ -517,7 +803,11 @@ export const appRouter = router({
         totalDealAmount: z.number().min(0).optional(),
         newCashCollected: z.number().min(0).optional(),
         existingCashCollected: z.number().min(0).optional(),
+        bnplFee: z.number().min(0).optional(),
+        downPayment: z.number().min(0).optional(),
+        monthlyAmount: z.number().min(0).optional(),
         notes: z.string().optional(),
+        docusignSigned: z.boolean().optional(),
       }))
       .mutation(async ({ input }) => {
         const { id, ...updates } = input;
@@ -529,26 +819,35 @@ export const appRouter = router({
         
         // Determine final values
         const dealDate = updates.dealDate ?? currentDeal.dealDate;
-        const date = new Date(dealDate);
-        const year = date.getFullYear();
-        const month = date.getMonth() + 1;
+        const { year, month } = parseYearMonth(dealDate);
         
         const showed = updates.showed ?? currentDeal.showed;
         const prepared = updates.prepared ?? currentDeal.prepared;
         const closed = updates.closed ?? currentDeal.closed;
+        const docusignSigned = updates.docusignSigned ?? currentDeal.docusignSigned;
         const newCash = updates.newCashCollected ?? parseFloat(currentDeal.newCashCollected || "0");
         const existingCash = updates.existingCashCollected ?? parseFloat(currentDeal.existingCashCollected || "0");
         const totalCash = newCash + existingCash;
         const setterId = updates.setterId !== undefined ? updates.setterId : currentDeal.setterId;
-        // Recalculate closer commission
-        const closerRate = await getCommissionRate(currentDeal.closerId, year, month);
-        const closerRateValue = closerRate ? parseFloat(closerRate.rate) : 0.10;
-        const closerCommission = closed ? calculateCloserCommission(totalCash, closerRateValue) : 0;
 
-        // Recalculate setter commission with the $6K cap
-        const setterCashCommission = (closed && setterId)
-          ? Math.min(totalCash, SETTER_CAP) * SETTER_RATE
-          : 0;
+        // DocuSign gate: no commission until signed.
+        const eligibleForCommission = closed && docusignSigned;
+
+        // Recalculate closer commission. Honor the in-house 9% override.
+        const effectivePaymentType = currentDeal.paymentType; // payment type isn't editable post-create
+        const closerRate = await getCommissionRate(currentDeal.closerId, year, month);
+        const fallbackRate = closerRate ? parseFloat(closerRate.rate) : 0.10;
+        const closerRateValue = effectiveCloserRate(effectivePaymentType, fallbackRate);
+        const closerCommission = eligibleForCommission ? calculateCloserCommission(totalCash, closerRateValue) : 0;
+
+        // Recalculate setter commission honoring per-setter cap and per-setter
+        // rate (Kresha 3%, Jake 2%). Setters never take the in-house haircut.
+        let setterCashCommission = 0;
+        if (eligibleForCommission && setterId) {
+          const setterCap = await getSetterCap(setterId);
+          const setterRate = await getSetterRate(setterId);
+          setterCashCommission = applySetterCap(totalCash, setterCap) * setterRate;
+        }
 
         const updateData: Record<string, unknown> = {
           closerCommission: closerCommission.toFixed(2),
@@ -570,8 +869,12 @@ export const appRouter = router({
         if (updates.totalDealAmount !== undefined) updateData.totalDealAmount = updates.totalDealAmount.toFixed(2);
         if (updates.newCashCollected !== undefined) updateData.newCashCollected = updates.newCashCollected.toFixed(2);
         if (updates.existingCashCollected !== undefined) updateData.existingCashCollected = updates.existingCashCollected.toFixed(2);
+        if (updates.bnplFee !== undefined) updateData.bnplFee = updates.bnplFee.toFixed(2);
+        if (updates.downPayment !== undefined) updateData.downPayment = updates.downPayment.toFixed(2);
+        if (updates.monthlyAmount !== undefined) updateData.monthlyAmount = updates.monthlyAmount.toFixed(2);
         if (updates.notes !== undefined) updateData.notes = updates.notes || null;
-        
+        if (updates.docusignSigned !== undefined) updateData.docusignSigned = updates.docusignSigned;
+
         const updatedDeal = await updateDeal(id, updateData as any);
         
         return updatedDeal;
@@ -666,14 +969,14 @@ export const appRouter = router({
           throw new TRPCError({ code: 'NOT_FOUND', message: 'Deal not found' });
         }
         
-        const dealDate = new Date(deal.dealDate);
-        const year = dealDate.getFullYear();
-        const month = dealDate.getMonth() + 1;
-        
-        // Get commission rates
+        const { year, month } = parseYearMonth(deal.dealDate);
+
+        // Get commission rate — in-house plans always pay 9% per the
+        // fee-offset rule; otherwise use the closer's time-based rate.
         const closerRate = await getCommissionRate(deal.closerId, year, month);
-        const closerRateValue = closerRate ? parseFloat(closerRate.rate) : 0.10;
-        
+        const fallbackRate = closerRate ? parseFloat(closerRate.rate) : 0.10;
+        const closerRateValue = effectiveCloserRate(deal.paymentType, fallbackRate);
+
         return collectPaymentPlanPayment(input.dealId, input.amountCollected, closerRateValue, 0);
       }),
 
@@ -685,15 +988,14 @@ export const appRouter = router({
         if (!deal) {
           throw new TRPCError({ code: 'NOT_FOUND', message: 'Deal not found' });
         }
-        
+
         const amountCollected = parseFloat(deal.monthlyAmount || "0");
-        const dealDate = new Date(deal.dealDate);
-        const year = dealDate.getFullYear();
-        const month = dealDate.getMonth() + 1;
-        
+        const { year, month } = parseYearMonth(deal.dealDate);
+
         const closerRate = await getCommissionRate(deal.closerId, year, month);
-        const closerRateValue = closerRate ? parseFloat(closerRate.rate) : 0.10;
-        
+        const fallbackRate = closerRate ? parseFloat(closerRate.rate) : 0.10;
+        const closerRateValue = effectiveCloserRate(deal.paymentType, fallbackRate);
+
         return collectPaymentPlanPayment(input.dealId, amountCollected, closerRateValue, 0);
       }),
   }),
@@ -1204,7 +1506,7 @@ export const appRouter = router({
             message: "Your coach account isn't linked to a payee. Ask admin to set this up in Settings → Payees.",
           });
         }
-        const now = new Date(input.sessionDate);
+        const { year, month } = parseYearMonth(input.sessionDate);
         return createCoachingSession({
           coachPayeeId: payee.id,
           sessionDate: input.sessionDate,
@@ -1216,8 +1518,8 @@ export const appRouter = router({
           notes: input.notes || null,
           recordingLink: input.recordingLink || null,
           isNoShow: input.isNoShow,
-          month: now.getMonth() + 1,
-          year: now.getFullYear(),
+          month,
+          year,
         });
       }),
 
@@ -1311,101 +1613,6 @@ export const appRouter = router({
       }),
   }),
 
-  // Subscriptions - monthly recurring with 25% closer commission
-  subscriptions: router({
-    create: protectedProcedure
-      .input(z.object({
-        clientName: z.string().min(1),
-        monthlyAmount: z.number().min(0.01),
-        closerId: z.number(),
-        startDate: z.string(),
-        startMonth: z.number().min(1).max(12),
-        startYear: z.number(),
-        notes: z.string().optional(),
-      }))
-      .mutation(async ({ input }) => {
-        return createSubscription({
-          clientName: input.clientName,
-          monthlyAmount: input.monthlyAmount.toFixed(2),
-          closerId: input.closerId,
-          startDate: input.startDate,
-          startMonth: input.startMonth,
-          startYear: input.startYear,
-          notes: input.notes || null,
-        });
-      }),
-
-    getAll: protectedProcedure.query(async () => {
-      return getAllSubscriptions();
-    }),
-
-    getActive: protectedProcedure.query(async () => {
-      return getActiveSubscriptions();
-    }),
-
-    getByCloser: protectedProcedure
-      .input(z.object({ closerId: z.number() }))
-      .query(async ({ input }) => {
-        return getSubscriptionsByCloser(input.closerId);
-      }),
-
-    cancel: protectedProcedure
-      .input(z.object({ id: z.number(), reason: z.string().optional() }))
-      .mutation(async ({ input }) => {
-        return cancelSubscription(input.id, input.reason);
-      }),
-
-    reactivate: adminProcedure
-      .input(z.object({ id: z.number() }))
-      .mutation(async ({ input }) => {
-        return reactivateSubscription(input.id);
-      }),
-
-    // Verification workflow
-    generateVerifications: protectedProcedure
-      .input(z.object({ year: z.number(), month: z.number().min(1).max(12) }))
-      .mutation(async ({ input }) => {
-        return generateMonthlyVerifications(input.year, input.month);
-      }),
-
-    getVerifications: protectedProcedure
-      .input(z.object({ year: z.number(), month: z.number().min(1).max(12) }))
-      .query(async ({ input }) => {
-        // Generate if needed, then return
-        await generateMonthlyVerifications(input.year, input.month);
-        return getVerificationsByMonth(input.year, input.month);
-      }),
-
-    verify: protectedProcedure
-      .input(z.object({ verificationId: z.number() }))
-      .mutation(async ({ ctx, input }) => {
-        return verifySubscription(input.verificationId, ctx.user.id);
-      }),
-
-    unverify: protectedProcedure
-      .input(z.object({ verificationId: z.number() }))
-      .mutation(async ({ input }) => {
-        return unverifySubscription(input.verificationId);
-      }),
-
-    markCancelled: protectedProcedure
-      .input(z.object({ verificationId: z.number() }))
-      .mutation(async ({ ctx, input }) => {
-        return markSubscriptionCancelled(input.verificationId, ctx.user.id);
-      }),
-
-    getCommissionsByCloser: protectedProcedure
-      .input(z.object({ closerId: z.number(), year: z.number(), month: z.number().min(1).max(12) }))
-      .query(async ({ input }) => {
-        return getSubscriptionCommissionsByCloser(input.closerId, input.year, input.month);
-      }),
-
-    getRandomForAudit: protectedProcedure
-      .input(z.object({ count: z.number().optional() }))
-      .query(async ({ input }) => {
-        return getRandomSubscriptionsForAudit(input.count || 5);
-      }),
-  }),
 
   // ==================== BOOKED CALLS (setter workflow) ====================
   bookedCalls: router({
@@ -1500,10 +1707,27 @@ export const appRouter = router({
         if (!existing) {
           throw new TRPCError({ code: "NOT_FOUND", message: "Booking not found." });
         }
-        // Setters can only edit their own bookings; admins can edit any.
+        // Setters can edit their own bookings; admins can edit any.
+        // Closers can ONLY update `dealId` on a booking assigned to them
+        // (the link step after creating a deal from that booking).
         if (ctx.user.role !== "admin") {
           const link = await getUserTeamLink(ctx.user.id);
-          if (link.teamMember?.id !== existing.setterId) {
+          const myTeamId = link.teamMember?.id;
+          const isAssignedSetter = myTeamId === existing.setterId;
+          const isAssignedCloser = myTeamId === existing.closerId;
+          if (isAssignedCloser && !isAssignedSetter) {
+            // Closer can only touch dealId — anything else and they're
+            // editing the setter's data.
+            const otherKeys = Object.keys(input).filter(
+              k => k !== "id" && k !== "dealId" && (input as Record<string, unknown>)[k] !== undefined,
+            );
+            if (otherKeys.length > 0) {
+              throw new TRPCError({
+                code: "FORBIDDEN",
+                message: "Closers can only link a booking to a deal — not edit setter fields.",
+              });
+            }
+          } else if (!isAssignedSetter) {
             throw new TRPCError({
               code: "FORBIDDEN",
               message: "Cannot edit another setter's booking.",
@@ -1571,7 +1795,743 @@ export const appRouter = router({
       }),
   }),
 
-  // ==================== SETTER PAYOUTS ($6K cap, 3% commission) ====================
+  // ==================== VSL CALL PREPS (Jake's discovery notes) ====================
+  // The OCE Setter Script V1 specifies that Jake records: motivation, trading
+  // experience, day-to-day, coachability, specific questions — plus red flags
+  // and stock-predator delivery confirmation. These routes mirror that.
+  vslPreps: router({
+    create: protectedProcedure
+      .input(z.object({
+        clientFirstName: z.string().min(1),
+        clientLastName: z.string().min(1),
+        phoneNumber: z.string().min(7),
+        email: z.string().email().optional().or(z.literal("")),
+        closerId: z.number().int().positive(),
+        vslBookedAt: z.string().optional(),       // ISO datetime, optional
+        vslWatched: z.boolean().default(false),
+        q1Motivation: z.string().optional(),
+        q2TradingExperience: z.string().optional(),
+        q3DayToDay: z.string().optional(),
+        q4Coachability: z.string().optional(),
+        q5SpecificQuestions: z.string().optional(),
+        stockPredatorDelivered: z.boolean().default(false),
+        redFlags: z.string().optional(),
+        notes: z.string().optional(),
+        setterId: z.number().int().positive().optional(), // admin override
+      }))
+      .mutation(async ({ input, ctx }) => {
+        let setterId = input.setterId;
+        if (!setterId) {
+          const link = await getUserTeamLink(ctx.user.id);
+          if (!link.teamMember || link.teamMember.role !== "setter") {
+            throw new TRPCError({
+              code: "FORBIDDEN",
+              message: "Only setters can create a VSL prep without specifying a setterId.",
+            });
+          }
+          setterId = link.teamMember.id;
+        } else if (ctx.user.role !== "admin") {
+          const link = await getUserTeamLink(ctx.user.id);
+          if (link.teamMember?.id !== setterId) {
+            throw new TRPCError({
+              code: "FORBIDDEN",
+              message: "Cannot file a prep under a different setter.",
+            });
+          }
+        }
+
+        return createVslCallPrep({
+          setterId,
+          closerId: input.closerId,
+          clientFirstName: input.clientFirstName,
+          clientLastName: input.clientLastName,
+          phoneNumber: input.phoneNumber,
+          email: input.email || null,
+          vslBookedAt: input.vslBookedAt ? new Date(input.vslBookedAt) : null,
+          vslWatched: input.vslWatched,
+          q1Motivation: input.q1Motivation ?? null,
+          q2TradingExperience: input.q2TradingExperience ?? null,
+          q3DayToDay: input.q3DayToDay ?? null,
+          q4Coachability: input.q4Coachability ?? null,
+          q5SpecificQuestions: input.q5SpecificQuestions ?? null,
+          stockPredatorDelivered: input.stockPredatorDelivered,
+          redFlags: input.redFlags ?? null,
+          notes: input.notes ?? null,
+        });
+      }),
+
+    // Setter views her/his own preps. Admin can pass setterId.
+    listMine: protectedProcedure
+      .input(z.object({ setterId: z.number().optional() }).optional())
+      .query(async ({ input, ctx }) => {
+        let setterId = input?.setterId;
+        if (!setterId) {
+          const link = await getUserTeamLink(ctx.user.id);
+          if (!link.teamMember) return [];
+          setterId = link.teamMember.id;
+        }
+        return getVslCallPrepsBySetter(setterId);
+      }),
+
+    // Closer views preps Jake filed for them.
+    listAssignedToMe: protectedProcedure
+      .input(z.object({ closerId: z.number().optional() }).optional())
+      .query(async ({ input, ctx }) => {
+        let closerId = input?.closerId;
+        if (!closerId) {
+          const link = await getUserTeamLink(ctx.user.id);
+          if (!link.teamMember) return [];
+          closerId = link.teamMember.id;
+        }
+        return getVslCallPrepsByCloser(closerId);
+      }),
+
+    listAll: adminProcedure.query(async () => {
+      return getAllVslCallPreps();
+    }),
+
+    update: protectedProcedure
+      .input(z.object({
+        id: z.number(),
+        clientFirstName: z.string().min(1).optional(),
+        clientLastName: z.string().min(1).optional(),
+        phoneNumber: z.string().min(7).optional(),
+        email: z.string().email().nullable().optional().or(z.literal("")),
+        closerId: z.number().int().positive().optional(),
+        vslBookedAt: z.string().nullable().optional(),
+        vslWatched: z.boolean().optional(),
+        q1Motivation: z.string().optional(),
+        q2TradingExperience: z.string().optional(),
+        q3DayToDay: z.string().optional(),
+        q4Coachability: z.string().optional(),
+        q5SpecificQuestions: z.string().optional(),
+        stockPredatorDelivered: z.boolean().optional(),
+        redFlags: z.string().optional(),
+        notes: z.string().optional(),
+        reviewedByCloser: z.boolean().optional(),
+        dealId: z.number().nullable().optional(),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        const existing = await getVslCallPrepById(input.id);
+        if (!existing) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "VSL prep not found." });
+        }
+        // Authorization: setter can edit own preps; closer can mark reviewed
+        // on theirs; admin can edit anything.
+        if (ctx.user.role !== "admin") {
+          const link = await getUserTeamLink(ctx.user.id);
+          const isOwnerSetter = link.teamMember?.id === existing.setterId;
+          const isAssignedCloser = link.teamMember?.id === existing.closerId;
+          if (!isOwnerSetter && !isAssignedCloser) {
+            throw new TRPCError({
+              code: "FORBIDDEN",
+              message: "You don't have access to this prep.",
+            });
+          }
+          // Closers can ONLY toggle "reviewedByCloser" or set "dealId"
+          // (the link step when they create a deal from this prep) — not
+          // edit any of the setter's content.
+          if (isAssignedCloser && !isOwnerSetter) {
+            const allowed = ["reviewedByCloser", "dealId"];
+            const tried = Object.keys(input).filter(k => k !== "id" && (input as any)[k] !== undefined);
+            if (tried.some(k => !allowed.includes(k))) {
+              throw new TRPCError({
+                code: "FORBIDDEN",
+                message: "Closers can only mark a prep as reviewed or link it to a deal.",
+              });
+            }
+          }
+        }
+        const { id, vslBookedAt, ...rest } = input;
+        const patch: any = { ...rest };
+        if (vslBookedAt !== undefined) {
+          patch.vslBookedAt = vslBookedAt ? new Date(vslBookedAt) : null;
+        }
+        return updateVslCallPrep(id, patch);
+      }),
+
+    delete: adminProcedure
+      .input(z.object({ id: z.number() }))
+      .mutation(async ({ input }) => {
+        const ok = await deleteVslCallPrep(input.id);
+        if (!ok) throw new TRPCError({ code: "NOT_FOUND", message: "VSL prep not found." });
+        return { success: true };
+      }),
+  }),
+
+  // ==================== SETTER PAYOUTS (3% — per-setter cap) ====================
+  // ─────────── Unified Client Profile ───────────
+  // The /clients/:dealId page reads from here. Access is gated:
+  //   - admin / payroll: any deal
+  //   - closer:          their own deals only
+  //   - setter:          deals attributed to them only
+  //   - coach:           clients matching by name (loose match) — we restrict
+  //                      access here too since coaches see this from their
+  //                      session list.
+  clients: router({
+    getProfile: protectedProcedure
+      .input(z.object({ dealId: z.number() }))
+      .query(async ({ input, ctx }) => {
+        const profile = await getClientProfile(input.dealId);
+        if (!profile) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Client not found" });
+        }
+
+        // Access policy: staff (admin, payroll, closer, setter, coach) ALL
+        // see every client. The team needs to be on the same page about
+        // each client across the funnel — setter who set the call, closer
+        // who closed the deal, Ariana who onboarded, coach who's reviewing
+        // trading log. The only redaction is for setters (closer commission
+        // hidden — setters shouldn't see what the closer earns).
+        //
+        // Clients (logged in as themselves) only see their own profile via
+        // clients.getMyProfile, not this endpoint.
+        const role = ctx.user.role;
+        if (role === "client") {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Use getMyProfile." });
+        }
+        const redactCloserCommission = role === "setter";
+
+        // Phase 3 — pull the program timeline + alert history. The timeline
+        // is null until Ariana marks onboarded (clock not started yet). Alerts
+        // are an empty array until the first cron run after T-21 hits.
+        const timeline = profile.onboarding?.onboardedAt
+          ? computeProgramTimeline(profile.onboarding.onboardedAt)
+          : null;
+        const extensionAlertsList = await getExtensionAlertsForDeal(input.dealId);
+
+        // Single return shape — redaction happens in-place on a copy.
+        return {
+          ...profile,
+          deal: redactCloserCommission
+            ? { ...profile.deal, closerCommission: "0" }
+            : profile.deal,
+          timeline,
+          extensionAlerts: extensionAlertsList,
+        };
+      }),
+
+    // Directory of all clients in the system. Surfaces enough for staff
+    // to find someone fast — name, date, closer, setter, coach, status.
+    // Click any row → unified Client Profile.
+    listAll: protectedProcedure.query(async ({ ctx }) => {
+      if (ctx.user.role === "client") {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Use getMyProfile." });
+      }
+      return getClientDirectory();
+    }),
+
+    // Ariana / admin creates a login for a client. Idempotent — re-running
+    // with the same email + dealId returns the existing user. Clients don't
+    // get a real password (they sign in via magic link); we set a random
+    // unguessable hash so the row is valid but unusable for password login.
+    createLogin: payrollProcedure
+      .input(z.object({
+        dealId: z.number(),
+        email: z.string().email(),
+        name: z.string().min(1),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        // Random 32-byte password the client never sees. Their auth path is
+        // magic links — the password column just needs to be non-null/valid.
+        const { randomBytes } = await import("node:crypto");
+        const noisePassword = randomBytes(32).toString("base64url");
+        const result = await createClientLogin({
+          dealId: input.dealId,
+          email: input.email,
+          name: input.name,
+          plainPassword: noisePassword,
+          createdByUserId: ctx.user.id,
+        });
+        return {
+          created: result.created,
+          user: {
+            id: result.user.id,
+            email: result.user.email,
+            name: result.user.name,
+            role: result.user.role,
+          },
+        };
+      }),
+
+    /**
+     * Send a magic-link sign-in email to the client of a deal. Used by
+     * Ariana on the Client Profile page during onboarding to give the
+     * client one-click access to their dashboard. Idempotent on reason
+     * + dealId — clicking the button twice in a row will fire two emails
+     * (each with a different valid token), so the client sees the latest.
+     */
+    sendSignInLink: payrollProcedure
+      .input(z.object({ dealId: z.number() }))
+      .mutation(async ({ input, ctx }) => {
+        const profile = await getClientProfile(input.dealId);
+        if (!profile?.clientUser) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Create the client login first.",
+          });
+        }
+        const { token } = await createLoginToken({
+          userId: profile.clientUser.id,
+          reason: "client_invite",
+          triggeredByUserId: ctx.user.id,
+          ttlMs: 30 * 24 * 60 * 60 * 1000,  // 30 days for invites — Ariana sends, client clicks later
+        });
+        const appUrl = process.env.APP_URL || "http://localhost:3000";
+        const link = `${appUrl}/login/magic?token=${token}`;
+        const firstName = profile.clientUser.name?.split(" ")[0] ?? "there";
+        const { sendEmail } = await import("./email");
+        await sendEmail({
+          to: {
+            email: profile.clientUser.email,
+            name: profile.clientUser.name ?? undefined,
+          },
+          subject: "Welcome — your Trader Foundation dashboard",
+          text: [
+            `Hi ${firstName},`,
+            "",
+            "Welcome to Trader Foundation! Your dashboard is ready — trading log, your assigned coach, and program timeline all in one place.",
+            "",
+            `Sign in here: ${link}`,
+            "",
+            "No password needed — this link signs you in. It works for 30 days; bookmark the dashboard once you're in.",
+            "",
+            "Any questions? Just reply to this email.",
+            "",
+            "— Ariana",
+            "Trader Foundation Onboarding",
+          ].join("\n"),
+          html: `
+<!DOCTYPE html>
+<html>
+<body style="margin:0; padding:24px; background:#0a0a0a; color:#cfcfcf; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">
+  <div style="max-width:520px; margin:0 auto; background:#161616; border:1px solid #2a2620; border-radius:12px; padding:32px;">
+    <p style="color:#c7ab77; font-size:11px; text-transform:uppercase; letter-spacing:2px; margin:0 0 8px 0;">Trader Foundation</p>
+    <h1 style="color:#c7ab77; font-size:24px; margin:0 0 16px 0;">Welcome to the family</h1>
+    <p style="margin:0 0 16px 0; line-height:1.6;">Hi ${firstName},</p>
+    <p style="margin:0 0 16px 0; line-height:1.6;">
+      Your dashboard is ready — <strong style="color:#fff;">trading log</strong>,
+      your assigned coach, and program timeline all in one place.
+    </p>
+    <a href="${link}" style="display:inline-block; background:#c7ab77; color:#0a0a0a; text-decoration:none; font-weight:600; padding:14px 28px; border-radius:8px; margin:8px 0 24px 0;">
+      Open my dashboard →
+    </a>
+    <p style="margin:0 0 16px 0; line-height:1.6; font-size:13px; color:#a0a0a0;">
+      No password needed — this link signs you in. It works for 30 days;
+      bookmark the dashboard once you're in.
+    </p>
+    <p style="margin:24px 0 0 0; padding-top:16px; border-top:1px solid #2a2620; font-size:12px; color:#8a8a8a; line-height:1.6;">
+      Any questions? Just reply to this email.<br/>
+      — Ariana<br/>
+      <em>Trader Foundation Onboarding</em>
+    </p>
+  </div>
+</body>
+</html>`.trim(),
+          relatedDealId: input.dealId,
+          relatedUserId: profile.clientUser.id,
+          triggeredByUserId: ctx.user.id,
+          replyTo: ctx.user.email,
+        });
+        return { ok: true };
+      }),
+
+    // Client fetches their own profile + trading-log-relevant context. Mirrors
+    // getProfile but skips the auth check (a client always sees their own
+    // deal) and never returns staff-private fields.
+    //
+    // Also returns ALL active coaches (with their photos + booking URLs) so
+    // the dashboard can list "or book another coach" alongside the assigned
+    // one. The assigned coach is the primary card; the rest are alternates.
+    getMyProfile: protectedProcedure.query(async ({ ctx }) => {
+      if (ctx.user.role !== "client") {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Client account required." });
+      }
+      const me = await getUserById(ctx.user.id);
+      if (!me?.clientDealId) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "No deal linked to this account yet." });
+      }
+      const profile = await getClientProfile(me.clientDealId);
+      if (!profile) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Client profile not found." });
+      }
+      const timeline = profile.onboarding?.onboardedAt
+        ? computeProgramTimeline(profile.onboarding.onboardedAt)
+        : null;
+
+      // Pull all active coaches with the booking + photo fields (the
+      // existing coachOptions only carries id+name).
+      const db = await getDb();
+      let allCoaches: Array<{
+        id: number;
+        name: string;
+        bookingUrl: string | null;
+        photoUrl: string | null;
+      }> = [];
+      if (db) {
+        const { payees } = await import("../drizzle/schema");
+        const { and: dAnd, eq: dEq, sql: dSql } = await import("drizzle-orm");
+        // "Bookable" = active + has a bookingUrl. This sweeps up Erin
+        // (typed `w2` in the payees table because she's salaried-W2 for
+        // payroll, but she's still a bookable coach for clients).
+        const rows = await db.select({
+          id: payees.id,
+          name: payees.name,
+          bookingUrl: payees.bookingUrl,
+          photoUrl: payees.photoUrl,
+        }).from(payees).where(dAnd(
+          dEq(payees.active, true),
+          dSql`${payees.bookingUrl} IS NOT NULL`,
+        ));
+        allCoaches = rows;
+      }
+
+      // Strip everything sales/commission-related — clients never see this.
+      const { closerCommission, setterCashCommission, setterShowCommission, ...safeDeal } = profile.deal;
+      return {
+        deal: safeDeal,
+        onboarding: profile.onboarding,
+        assignedCoach: profile.assignedCoach,
+        allCoaches,
+        coachingSessions: profile.coachingSessions,
+        timeline,
+      };
+    }),
+  }),
+
+  // ─────────── Extensions (90-day renewal pipeline) ───────────
+  extensions: router({
+    // Closer's own upcoming clients (program ending soon). Ariana / admin
+    // can override by passing closerTeamMemberId, or omit it to get all.
+    listUpcoming: protectedProcedure
+      .input(z.object({ closerTeamMemberId: z.number().optional() }).optional())
+      .query(async ({ input, ctx }) => {
+        const role = ctx.user.role;
+        if (role === "admin" || role === "payroll") {
+          return getUpcomingExtensions(
+            input?.closerTeamMemberId ? { closerTeamMemberId: input.closerTeamMemberId } : {},
+          );
+        }
+        if (role === "closer") {
+          // Force-filter to the closer's own clients, regardless of input.
+          const link = await getUserTeamLink(ctx.user.id);
+          if (!link.teamMember) return [];
+          return getUpcomingExtensions({ closerTeamMemberId: link.teamMember.id });
+        }
+        // Setters and coaches don't see this widget.
+        return [];
+      }),
+
+    // Move a client through the renewal pipeline. Closers can update their
+    // own clients; payroll/admin can update any.
+    setStatus: protectedProcedure
+      .input(z.object({
+        dealId: z.number(),
+        status: z.enum(["window_open", "outreach_started", "call_booked", "extended", "lapsed"]),
+        notes: z.string().optional(),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        const role = ctx.user.role;
+        if (role !== "admin" && role !== "payroll") {
+          // Closer access: must own the deal
+          const deal = await getDealById(input.dealId);
+          if (!deal) throw new TRPCError({ code: "NOT_FOUND" });
+          if (role === "closer") {
+            const link = await getUserTeamLink(ctx.user.id);
+            if (link.teamMember?.id !== deal.closerId) {
+              throw new TRPCError({ code: "FORBIDDEN", message: "Not your client." });
+            }
+          } else {
+            throw new TRPCError({ code: "FORBIDDEN" });
+          }
+        }
+        return setExtensionStatus(input.dealId, input.status, ctx.user.id, input.notes);
+      }),
+
+    // Manual trigger — admin clicks "Run now" in the UI to fire any due
+    // alerts immediately. Idempotent: running it twice in a row produces
+    // zero new alerts on the second call.
+    runRemindersNow: adminProcedure.mutation(async () => {
+      return runExtensionReminders();
+    }),
+  }),
+
+  // ─────────── Trading Log ───────────
+  // One log per client (lifetime). Created by Ariana from the Client Profile;
+  // the client edits their own; coach reviews read-only; admin/payroll see all.
+  tradingLog: router({
+    // Ariana / admin creates the log for a client. Idempotent — re-running
+    // returns the existing log.
+    create: payrollProcedure
+      .input(z.object({
+        dealId: z.number(),
+        startingBalance: z.number().min(0).default(0),
+        brokerNote: z.string().optional(),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        // Anchor: the client login linked to this deal.
+        const existingByDeal = await getTradingLogByDealId(input.dealId);
+        if (existingByDeal) return { log: existingByDeal, created: false };
+
+        // Find the client user for this deal — must already exist.
+        const deal = await getDealById(input.dealId);
+        if (!deal) throw new TRPCError({ code: "NOT_FOUND", message: "Deal not found" });
+
+        const profile = await getClientProfile(input.dealId);
+        if (!profile?.clientUser) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Create the client login first — the trading log is bound to their account.",
+          });
+        }
+
+        const log = await createTradingLog({
+          clientUserId: profile.clientUser.id,
+          dealId: input.dealId,
+          startingBalance: input.startingBalance,
+          brokerNote: input.brokerNote ?? null,
+          createdById: ctx.user.id,
+        });
+        return { log, created: true };
+      }),
+
+    // Client fetches their own log + entries + stats. The client dashboard's
+    // primary call.
+    getMine: protectedProcedure
+      .input(z.object({
+        year: z.number().optional(),
+        month: z.number().min(1).max(12).optional(),
+      }).optional())
+      .query(async ({ input, ctx }) => {
+        if (ctx.user.role !== "client") {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Client account required." });
+        }
+        const log = await getTradingLogByClientUserId(ctx.user.id);
+        if (!log) return { log: null, entries: [], stats: null };
+        const entries = await getTradeEntriesForLog(log.id, input);
+        const stats = await getTradingLogStats(log.id);
+        return { log, entries, stats };
+      }),
+
+    // Coach / payroll / admin / closer view of a specific client's log.
+    getForDeal: protectedProcedure
+      .input(z.object({
+        dealId: z.number(),
+        year: z.number().optional(),
+        month: z.number().min(1).max(12).optional(),
+      }))
+      .query(async ({ input, ctx }) => {
+        // Staff all see every client's log (one-team principle). Clients see
+        // only their own — they have getMine; this path requires verifying
+        // they own this specific log.
+        const role = ctx.user.role;
+        if (role === "client") {
+          const log = await getTradingLogByDealId(input.dealId);
+          if (log?.clientUserId !== ctx.user.id) {
+            throw new TRPCError({ code: "FORBIDDEN", message: "Not your log." });
+          }
+        }
+
+        const log = await getTradingLogByDealId(input.dealId);
+        if (!log) return { log: null, entries: [], stats: null };
+        const entries = await getTradeEntriesForLog(log.id, {
+          year: input.year, month: input.month,
+        });
+        const stats = await getTradingLogStats(log.id);
+        return { log, entries, stats };
+      }),
+
+    // Coach's "all my clients' logs" view for the Coach Dashboard.
+    listForMyCoach: protectedProcedure.query(async ({ ctx }) => {
+      if (ctx.user.role !== "coach") return [];
+      const myPayee = await getPayeeByUserId(ctx.user.id);
+      if (!myPayee) return [];
+      return getTradingLogsForCoach(myPayee.id);
+    }),
+
+    // Add a trade row. Client owns their log; admin/payroll can also write.
+    addEntry: protectedProcedure
+      .input(z.object({
+        tradingLogId: z.number(),
+        ticker: z.string().min(1).max(16),
+        strategy: z.enum(["bounce_profit", "ready_set_explode", "paycheck_collector"]),
+        direction: z.enum(["directional_bullish", "directional_bearish"]),
+        result: z.enum(["win", "loss"]).nullable().optional(),
+        entryDate: z.string(),
+        entryTime: z.string().optional(),
+        exitDate: z.string().optional(),
+        strikePrices: z.string().optional(),
+        expirationDate: z.string().optional(),
+        contractCount: z.number().int().min(1).default(1),
+        askPrice: z.number().min(0),
+        bidPrice: z.number().min(0),
+        notes: z.string().optional(),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        await assertCanWriteToLog(ctx.user.id, ctx.user.role, input.tradingLogId);
+        return addTradeEntry(input);
+      }),
+
+    updateEntry: protectedProcedure
+      .input(z.object({
+        entryId: z.number(),
+        patch: z.object({
+          ticker: z.string().min(1).max(16).optional(),
+          strategy: z.enum(["bounce_profit", "ready_set_explode", "paycheck_collector"]).optional(),
+          direction: z.enum(["directional_bullish", "directional_bearish"]).optional(),
+          result: z.enum(["win", "loss"]).nullable().optional(),
+          entryDate: z.string().optional(),
+          entryTime: z.string().nullable().optional(),
+          exitDate: z.string().nullable().optional(),
+          strikePrices: z.string().nullable().optional(),
+          expirationDate: z.string().nullable().optional(),
+          contractCount: z.number().int().min(1).optional(),
+          askPrice: z.number().min(0).optional(),
+          bidPrice: z.number().min(0).optional(),
+          notes: z.string().nullable().optional(),
+        }),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        const entry = await getTradeEntry(input.entryId);
+        if (!entry) throw new TRPCError({ code: "NOT_FOUND" });
+        await assertCanWriteToLog(ctx.user.id, ctx.user.role, entry.tradingLogId);
+        return updateTradeEntry(input.entryId, input.patch);
+      }),
+
+    deleteEntry: protectedProcedure
+      .input(z.object({ entryId: z.number() }))
+      .mutation(async ({ input, ctx }) => {
+        const entry = await getTradeEntry(input.entryId);
+        if (!entry) throw new TRPCError({ code: "NOT_FOUND" });
+        await assertCanWriteToLog(ctx.user.id, ctx.user.role, entry.tradingLogId);
+        return { ok: await deleteTradeEntry(input.entryId) };
+      }),
+
+    // Update the log itself (starting balance, broker note). Allowed for:
+    //   - admin / payroll (any log)
+    //   - the client who owns the log (their own only)
+    // Coaches and closers are read-only on this.
+    updateLog: protectedProcedure
+      .input(z.object({
+        tradingLogId: z.number(),
+        startingBalance: z.number().min(0).optional(),
+        brokerNote: z.string().nullable().optional(),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        const role = ctx.user.role;
+        if (role !== "admin" && role !== "payroll") {
+          if (role !== "client") {
+            throw new TRPCError({ code: "FORBIDDEN", message: "Read-only role." });
+          }
+          const log = await getTradingLogById(input.tradingLogId);
+          if (log?.clientUserId !== ctx.user.id) {
+            throw new TRPCError({ code: "FORBIDDEN", message: "Not your log." });
+          }
+        }
+        return updateTradingLog(input.tradingLogId, {
+          startingBalance: input.startingBalance,
+          brokerNote: input.brokerNote ?? undefined,
+        });
+      }),
+  }),
+
+  // ─────────── Onboarding (Ariana's queue) ───────────
+  // Read access: any authenticated user (closers see their own clients on
+  // the unified profile page). Mutations: payroll/admin only.
+  onboarding: router({
+    // The pending queue — every DocuSigned, closed deal that hasn't been
+    // marked fully onboarded yet. Sorted oldest first so nothing rots.
+    listPending: payrollProcedure.query(async () => {
+      return getPendingOnboardings();
+    }),
+
+    // Last 30 days of completed onboardings — Ariana's "recent" tab.
+    listRecent: payrollProcedure.query(async () => {
+      return getRecentlyOnboarded();
+    }),
+
+    // Get the onboarding row for a specific deal. Returns null if Ariana
+    // hasn't started it yet. Read-allowed for any authenticated user so the
+    // unified Client Profile can show the checklist state to the closer.
+    getByDealId: protectedProcedure
+      .input(z.object({ dealId: z.number() }))
+      .query(async ({ input }) => {
+        return getDealOnboarding(input.dealId);
+      }),
+
+    // Patch any subset of the checklist. Auto-stamps the *At fields when
+    // their boolean flips true (so we capture when each step happened).
+    // Side-effect: if the coach assignment changes to a non-null value, fire
+    // a one-time email to the coach (idempotent on dealId+coachPayeeId).
+    update: payrollProcedure
+      .input(z.object({
+        dealId: z.number(),
+        skoolAccessGranted: z.boolean().optional(),
+        paymentVerified: z.boolean().optional(),
+        paymentNote: z.string().optional(),
+        introCallBooked: z.boolean().optional(),
+        coachAssignedPayeeId: z.number().nullable().optional(),
+        tradingLogAssigned: z.boolean().optional(),
+        weeklyCheckInSent: z.boolean().optional(),
+        notes: z.string().optional(),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        const { dealId, ...patch } = input;
+
+        // Auto-stamp timestamps when a flag flips true. We pull the current
+        // row first so we only stamp on the rising edge — flipping back to
+        // false won't clear the timestamp (kept for audit), but flipping
+        // true→false→true won't double-stamp either.
+        const current = await getDealOnboarding(dealId);
+        const stamped: Record<string, unknown> = { ...patch };
+        if (patch.skoolAccessGranted === true && !current?.skoolAccessGranted) {
+          stamped.skoolAccessAt = new Date();
+        }
+        if (patch.paymentVerified === true && !current?.paymentVerified) {
+          stamped.paymentVerifiedAt = new Date();
+        }
+        if (patch.introCallBooked === true && !current?.introCallBooked) {
+          stamped.introCallBookedAt = new Date();
+        }
+
+        const updated = await upsertDealOnboarding(dealId, stamped);
+
+        // Email the coach if a NEW coach was assigned (rising edge or change).
+        const coachChanged =
+          patch.coachAssignedPayeeId !== undefined &&
+          patch.coachAssignedPayeeId !== null &&
+          patch.coachAssignedPayeeId !== current?.coachAssignedPayeeId;
+        if (coachChanged && patch.coachAssignedPayeeId) {
+          // Fire-and-log; failures don't break the mutation.
+          await notifyCoachOfAssignment({
+            dealId,
+            coachPayeeId: patch.coachAssignedPayeeId,
+            triggeredByUserId: ctx.user.id,
+            triggeredByName: ctx.user.name ?? undefined,
+          });
+        }
+
+        return updated;
+      }),
+
+    // Mark the whole thing complete. Stamps onboardedAt + onboardedById.
+    // This is the moment the 90-day program clock starts ticking (Phase 3).
+    complete: payrollProcedure
+      .input(z.object({ dealId: z.number() }))
+      .mutation(async ({ input, ctx }) => {
+        return markDealOnboardingComplete(input.dealId, ctx.user.id);
+      }),
+
+    // Reopen a completed onboarding (un-stamp). Useful for "marked early
+    // by mistake" or "client paused, restart later." Doesn't touch the
+    // individual checkbox state.
+    reopen: payrollProcedure
+      .input(z.object({ dealId: z.number() }))
+      .mutation(async ({ input }) => {
+        return reopenDealOnboarding(input.dealId);
+      }),
+  }),
+
   setter: router({
     // Setter sees her own payouts. Admin/payroll can pass setterId.
     payouts: protectedProcedure
@@ -1584,7 +2544,9 @@ export const appRouter = router({
         let setterId = input.setterId;
         if (!setterId) {
           const link = await getUserTeamLink(ctx.user.id);
-          if (!link.teamMember) return { lines: [], totalCommission: 0, cap: SETTER_CAP, rate: SETTER_RATE };
+          if (!link.teamMember) {
+            return { lines: [], totalCommission: 0, cap: null, rate: SETTER_RATE };
+          }
           setterId = link.teamMember.id;
         } else if (ctx.user.role !== "admin" && ctx.user.role !== "payroll") {
           const link = await getUserTeamLink(ctx.user.id);
@@ -1592,8 +2554,9 @@ export const appRouter = router({
             throw new TRPCError({ code: "FORBIDDEN", message: "Cannot view another setter's payouts." });
           }
         }
-        const result = await getSetterPayouts(setterId, input.year, input.month);
-        return { ...result, cap: SETTER_CAP, rate: SETTER_RATE };
+        // getSetterPayouts returns the per-setter cap + per-setter rate
+        // (Kresha 3%, Jake 2%). UI reads `rate` for the % column header.
+        return getSetterPayouts(setterId, input.year, input.month);
       }),
 
     // Returns the deal-level rows the setter is allowed to see (capped cash).
@@ -1611,20 +2574,24 @@ export const appRouter = router({
           if (!link.teamMember) return [];
           setterId = link.teamMember.id;
         }
+        const cap = await getSetterCap(setterId);
+        const rate = await getSetterRate(setterId);
         const deals = await getDealsBySetter(setterId, input.year, input.month);
-        // Return only setter-safe fields: hide totalDealAmount, hide closer commission, etc.
+        // Return only setter-safe fields. Cash is capped per the setter's
+        // own cap (Kresha=$6K, Jake=uncapped) and rate (Kresha=3%, Jake=2%).
         return deals
           .filter(d => d.closed)
           .map(d => {
             const cash =
               parseFloat(d.newCashCollected || "0") +
               parseFloat(d.existingCashCollected || "0");
+            const eligible = applySetterCap(cash, cap);
             return {
               dealId: d.id,
               dealDate: d.dealDate,
               closerId: d.closerId,
-              cappedCashCollected: Math.min(cash, SETTER_CAP),
-              setterCommission: Math.min(cash, SETTER_CAP) * SETTER_RATE,
+              cappedCashCollected: eligible,
+              setterCommission: eligible * rate,
             };
           });
       }),

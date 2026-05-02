@@ -11,5 +11,11 @@
   },
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/index" }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/extension-reminders",
+      "schedule": "0 13 * * *"
+    }
   ]
 }

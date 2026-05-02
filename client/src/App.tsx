@@ -16,7 +16,6 @@ import Reports from "./pages/Reports";
 import Login from "./pages/Login";
 import UserManagement from "./pages/UserManagement";
 import CoachingSessions from "./pages/CoachingSessions";
-import Subscriptions from "./pages/Subscriptions";
 import CoachDashboard from "./pages/CoachDashboard";
 import CloserDashboard from "./pages/CloserDashboard";
 import SetterDashboard from "./pages/SetterDashboard";
@@ -30,6 +29,11 @@ import AdminSOP from "./pages/sop/AdminSOP";
 import MindMap from "./pages/MindMap";
 import SalesTracker from "./pages/SalesTracker";
 import ChangePassword from "./pages/ChangePassword";
+import Onboarding from "./pages/Onboarding";
+import ClientProfile from "./pages/ClientProfile";
+import ClientDashboard from "./pages/ClientDashboard";
+import ClientDirectory from "./pages/ClientDirectory";
+import MagicLogin from "./pages/MagicLogin";
 import { trpc } from "./lib/trpc";
 import { Loader2 } from "lucide-react";
 
@@ -46,8 +50,13 @@ function AuthenticatedRouter() {
     );
   }
   
-  // If not logged in, show login page
+  // If not logged in, show the login page UNLESS they're hitting the magic
+  // link consumer route (/login/magic?token=...) — that needs to render even
+  // without a session so we can sign them in.
   if (!user) {
+    if (location.startsWith("/login/magic")) {
+      return <MagicLogin />;
+    }
     return <Login />;
   }
   
@@ -67,9 +76,12 @@ function AuthenticatedRouter() {
   
   const hasAccess = userPermissions.includes("*") || userPermissions.includes(location);
   
-  // Map route paths to their base paths for permission checking
+  // Map route paths to their base paths for permission checking. Dynamic
+  // segments (e.g. /clients/:id) collapse to their parent so the permissions
+  // list only needs the static prefix.
   const getBasePath = (path: string): string => {
     if (path === "/deals/new") return "/new-entry";
+    if (path.startsWith("/clients/")) return "/clients";
     return path;
   };
   
@@ -83,6 +95,8 @@ function AuthenticatedRouter() {
         <Switch>
           <Route path="/" component={CoachDashboard} />
           <Route path="/coaching-sessions" component={CoachDashboard} />
+          <Route path="/clients" component={ClientDirectory} />
+          <Route path="/clients/:dealId" component={ClientProfile} />
           <Route path="/sop" component={CoachSOP} />
           <Route path="/change-password" component={ChangePassword} />
           <Route component={CoachDashboard} />
@@ -102,7 +116,8 @@ function AuthenticatedRouter() {
           <Route path="/new-entry" component={NewDeal} />
           <Route path="/sales-tracker" component={SalesTracker} />
           <Route path="/setter-bookings" component={SetterBookings} />
-          <Route path="/subscriptions" component={Subscriptions} />
+          <Route path="/clients" component={ClientDirectory} />
+          <Route path="/clients/:dealId" component={ClientProfile} />
           <Route path="/sop" component={CloserSOP} />
           <Route path="/change-password" component={ChangePassword} />
           <Route component={CloserDashboard} />
@@ -111,13 +126,32 @@ function AuthenticatedRouter() {
     );
   }
 
-  // Setter role: book calls + see her own bookings + her capped payouts
+  // Client role — the trader who paid for the program. Trading log + coach
+  // card + Skool link. This dashboard grows over time.
+  if (user.role === "client") {
+    return (
+      <DashboardLayout>
+        <Switch>
+          <Route path="/" component={ClientDashboard} />
+          <Route path="/trading-log" component={ClientDashboard} />
+          <Route path="/change-password" component={ChangePassword} />
+          <Route component={ClientDashboard} />
+        </Switch>
+      </DashboardLayout>
+    );
+  }
+
+  // Setter role: book calls + see her own bookings + her capped payouts.
+  // Setters now also see the full Client Directory — they need to follow
+  // a prospect through the funnel they helped fill.
   if (user.role === "setter") {
     return (
       <DashboardLayout>
         <Switch>
           <Route path="/" component={SetterDashboard} />
           <Route path="/setter-dashboard" component={SetterDashboard} />
+          <Route path="/clients" component={ClientDirectory} />
+          <Route path="/clients/:dealId" component={ClientProfile} />
           <Route path="/sop" component={SetterSOP} />
           <Route path="/change-password" component={ChangePassword} />
           <Route component={SetterDashboard} />
@@ -126,16 +160,18 @@ function AuthenticatedRouter() {
     );
   }
 
-  // Payroll role
+  // Payroll role (Ariana — onboarding + payroll)
   if (user.role === "payroll") {
     return (
       <DashboardLayout>
         <Switch>
           <Route path="/" component={Dashboard} />
+          <Route path="/onboarding" component={Onboarding} />
+          <Route path="/clients" component={ClientDirectory} />
+          <Route path="/clients/:dealId" component={ClientProfile} />
           <Route path="/payroll" component={PayrollDashboard} />
           <Route path="/payouts" component={Payouts} />
           <Route path="/payment-plans" component={PaymentPlans} />
-          <Route path="/subscriptions" component={Subscriptions} />
           <Route path="/coaching-sessions" component={CoachingSessions} />
           <Route path="/sop" component={PayrollSOP} />
           <Route path="/change-password" component={ChangePassword} />
@@ -155,6 +191,8 @@ function AuthenticatedRouter() {
         <Route path="/payouts" component={Payouts} />
         <Route path="/payroll" component={PayrollDashboard} />
         <Route path="/payment-plans" component={PaymentPlans} />
+        <Route path="/onboarding" component={Onboarding} />
+        <Route path="/clients/:dealId" component={ClientProfile} />
         <Route path="/reports" component={Reports} />
         <Route path="/my-deals" component={MyDeals} />
         <Route path="/setter-bookings" component={SetterBookings} />
@@ -170,7 +208,6 @@ function AuthenticatedRouter() {
         <Route path="/settings" component={Settings} />
         <Route path="/users" component={UserManagement} />
         <Route path="/coaching-sessions" component={CoachingSessions} />
-        <Route path="/subscriptions" component={Subscriptions} />
         <Route path="/coach-dashboard" component={CoachDashboard} />
           <Route path="/change-password" component={ChangePassword} />
           <Route path="/login" component={Login} />
