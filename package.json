@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "NODE_ENV=development tsx watch server/_core/index.ts",
     "build": "pnpm build:api && vite build",
-    "build:api": "esbuild api/_handler.ts --bundle --platform=node --format=cjs --target=node20 --outfile=api/index.js --external:pg-native --external:cardinal",
+    "build:api": "echo '⚡ Building serverless API bundle…' && esbuild server/_serverless-entry.ts --bundle --platform=node --format=cjs --target=node20 --outfile=api/index.js --external:pg-native --external:cardinal && echo '✓ api/index.js built' && ls -la api/index.js",
     "start": "NODE_ENV=production tsx server/_core/index.ts",
     "check": "tsc --noEmit",
     "format": "prettier --write .",
