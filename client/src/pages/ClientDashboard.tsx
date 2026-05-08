@@ -76,11 +76,38 @@ export default function ClientDashboard() {
     );
   }
 
-  if (profileQuery.isError) {
+  if (profileQuery.isError || !profileQuery.data) {
+    if (me?.role === "admin") {
+      return (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <Sparkles className="h-4 w-4 text-primary" />
+              Client Dashboard — Admin Preview
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm text-muted-foreground">
+            <p>
+              This is the layout a client (the trader) sees after they sign in.
+              It surfaces a welcome header with their program timeline, an
+              assigned-coach card with a Book Session button, the Trading Log
+              (live P/L plus add/edit/delete trades), Skool / onboarding quick
+              links, and the most recent coaching sessions.
+            </p>
+            <p>
+              Real data only renders for accounts linked to a client deal.
+              Pick a deal from <span className="text-primary">Clients</span> to
+              inspect a specific trader's data, or wait for the upcoming
+              "View as" feature to see the page through their eyes.
+            </p>
+          </CardContent>
+        </Card>
+      );
+    }
     return (
       <Card>
         <CardContent className="py-12 text-center space-y-2">
-          <p className="text-sm text-muted-foreground">{profileQuery.error.message}</p>
+          <p className="text-sm text-muted-foreground">{profileQuery.error?.message ?? "No profile available."}</p>
           <p className="text-xs text-muted-foreground">
             Reach out to Ariana — she'll fix this in a minute.
           </p>
@@ -90,7 +117,6 @@ export default function ClientDashboard() {
   }
 
   const p = profileQuery.data;
-  if (!p) return null;
   const t = p.timeline;
 
   return (

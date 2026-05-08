@@ -209,6 +209,8 @@ function AuthenticatedRouter() {
         <Route path="/users" component={UserManagement} />
         <Route path="/coaching-sessions" component={CoachingSessions} />
         <Route path="/coach-dashboard" component={CoachDashboard} />
+        <Route path="/closer-dashboard" component={CloserDashboard} />
+        <Route path="/client-dashboard" component={ClientDashboard} />
           <Route path="/change-password" component={ChangePassword} />
           <Route path="/login" component={Login} />
           <Route path="/404" component={NotFound} />

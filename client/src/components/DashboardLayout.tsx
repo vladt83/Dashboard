@@ -68,6 +68,17 @@ const fullNavSections = [
     ],
   },
   {
+    label: "Role Previews",
+    icon: LayoutDashboard,
+    adminOnly: true,
+    items: [
+      { icon: TrendingUp, label: "Closer View", path: "/closer-dashboard", permPath: "/closer-dashboard" },
+      { icon: CalendarPlus, label: "Setter View", path: "/setter-dashboard", permPath: "/setter-dashboard" },
+      { icon: GraduationCap, label: "Coach View", path: "/coach-dashboard", permPath: "/coach-dashboard" },
+      { icon: BookOpen, label: "Client View", path: "/client-dashboard", permPath: "/client-dashboard" },
+    ],
+  },
+  {
     label: "Admin",
     icon: ShieldCheck,
     adminOnly: true,

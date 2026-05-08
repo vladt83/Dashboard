@@ -168,7 +168,7 @@ export default function CloserDashboard() {
     );
   }
 
-  if (!teamMemberId) {
+  if (!teamMemberId && user?.role !== "admin") {
     return (
       <div className="flex flex-col items-center justify-center min-h-[400px] text-center">
         <Users className="h-16 w-16 text-muted-foreground mb-4 opacity-30" />
