@@ -143,10 +143,7 @@ export default function Login() {
             </TabsList>
 
             <TabsContent value="login">
-              {/* Email + password sign-in. Same flow for every role. New
-                  accounts (or anyone whose hash was never set) use the
-                  default password "trader" — they can change it after
-                  signing in via Settings → Change Password. */}
+              {/* Email + password sign-in. Same flow for every role. */}
               <form onSubmit={handleLogin} className="space-y-4 mt-4">
                 <div className="space-y-2">
                   <Label htmlFor="login-email">Email</Label>
@@ -196,9 +193,6 @@ export default function Login() {
                     "Sign in"
                   )}
                 </Button>
-                <p className="text-xs text-muted-foreground text-center pt-2">
-                  First time? Use the default password <span className="font-mono text-primary">trader</span>, then change it in Settings.
-                </p>
               </form>
             </TabsContent>
 
