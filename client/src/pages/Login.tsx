@@ -150,9 +150,20 @@ export default function Login() {
               <form onSubmit={handleLogin} className="space-y-4 mt-4">
                 <div className="space-y-2">
                   <Label htmlFor="login-email">Email</Label>
+                  {/* type="text" + inputMode="email" gives the email
+                      keyboard on iOS but bypasses Safari's "string did
+                      not match the expected pattern" form-validation
+                      block, which is overzealous about autofilled
+                      values. Server-side z.string().email() still
+                      validates. */}
                   <Input
                     id="login-email"
-                    type="email"
+                    type="text"
+                    inputMode="email"
+                    autoComplete="email"
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    spellCheck={false}
                     placeholder="you@traderfoundation.com"
                     value={loginEmail}
                     onChange={(e) => setLoginEmail(e.target.value)}
