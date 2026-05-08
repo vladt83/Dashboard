@@ -320,20 +320,41 @@ export const appRouter = router({
     login: publicProcedure
       .input(z.object({
         email: z.string().email(),
-        password: z.string().min(6),
+        // 5-char minimum so the default "trader" first-login seed validates.
+        password: z.string().min(5),
       }))
       .mutation(async ({ input, ctx }) => {
         const user = await getUserByEmail(input.email.toLowerCase());
-        
-        if (!user || !user.passwordHash) {
+
+        if (!user) {
           throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Invalid email or password' });
         }
-        
-        const validPassword = await bcrypt.compare(input.password, user.passwordHash);
-        if (!validPassword) {
-          throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Invalid email or password' });
+
+        // First-login seed: any user that doesn't yet have a passwordHash
+        // (legacy magic-link-only accounts, freshly created client logins,
+        // etc.) can sign in once with the default password "trader". The
+        // hash is persisted on that login so subsequent sign-ins go through
+        // the normal bcrypt path and the user can change it via
+        // auth.changePassword.
+        if (!user.passwordHash) {
+          if (input.password !== "trader") {
+            throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Invalid email or password' });
+          }
+          const seededHash = await bcrypt.hash("trader", 10);
+          const dbInst = await getDb();
+          if (!dbInst) {
+            throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database not available' });
+          }
+          const { users } = await import("../drizzle/schema");
+          await dbInst.update(users).set({ passwordHash: seededHash, updatedAt: new Date() }).where(eq(users.id, user.id));
+          user.passwordHash = seededHash;
+        } else {
+          const validPassword = await bcrypt.compare(input.password, user.passwordHash);
+          if (!validPassword) {
+            throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Invalid email or password' });
+          }
         }
-        
+
         // Create session token (JWT cookie)
         const { createSessionToken } = await import("./_core/auth");
         const sessionToken = await createSessionToken(user.openId || `user-${user.id}`, {
@@ -2022,9 +2043,9 @@ export const appRouter = router({
     }),
 
     // Ariana / admin creates a login for a client. Idempotent — re-running
-    // with the same email + dealId returns the existing user. Clients don't
-    // get a real password (they sign in via magic link); we set a random
-    // unguessable hash so the row is valid but unusable for password login.
+    // with the same email + dealId returns the existing user. Clients sign
+    // in with the same default-password flow as staff: email + "trader" on
+    // first login, then they change it via the change-password page.
     createLogin: payrollProcedure
       .input(z.object({
         dealId: z.number(),
@@ -2032,15 +2053,11 @@ export const appRouter = router({
         name: z.string().min(1),
       }))
       .mutation(async ({ input, ctx }) => {
-        // Random 32-byte password the client never sees. Their auth path is
-        // magic links — the password column just needs to be non-null/valid.
-        const { randomBytes } = await import("node:crypto");
-        const noisePassword = randomBytes(32).toString("base64url");
         const result = await createClientLogin({
           dealId: input.dealId,
           email: input.email,
           name: input.name,
-          plainPassword: noisePassword,
+          plainPassword: "trader",
           createdByUserId: ctx.user.id,
         });
         return {

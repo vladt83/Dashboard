@@ -31,13 +31,11 @@ export default function Login() {
   const [, navigate] = useLocation();
   const [isLoading, setIsLoading] = useState(false);
 
-  // Login form state — email only, no password. Magic link does the rest.
+  // Sign-in form state — email + password. New users (and existing
+  // accounts that never had a password set) sign in with the default
+  // password "trader" the first time, then change it from Settings.
   const [loginEmail, setLoginEmail] = useState("");
-  // Set when the server returns a clickable dev link (only when email
-  // sending is stubbed because RESEND_API_KEY isn't configured). In prod
-  // this is always null and the user uses the email instead.
-  const [devLink, setDevLink] = useState<string | null>(null);
-  const [linkSent, setLinkSent] = useState(false);
+  const [loginPassword, setLoginPassword] = useState("");
 
   // Register form state
   const [registerName, setRegisterName] = useState("");
@@ -46,30 +44,33 @@ export default function Login() {
   const [registerConfirmPassword, setRegisterConfirmPassword] = useState("");
   const [registerRole, setRegisterRole] = useState("");
 
-  // Magic-link request — the only sign-in path. Server always returns
-  // success even for unknown emails (don't leak account existence).
-  const magicLinkMutation = trpc.auth.requestMagicLink.useMutation({
-    onSuccess: (r) => {
-      toast.success(r.message ?? "Check your email for a sign-in link.");
-      setLinkSent(true);
-      setIsLoading(false);
-      if (r.devLink) setDevLink(r.devLink);
+  const loginMutation = trpc.auth.login.useMutation({
+    onSuccess: () => {
+      toast.success("Signed in.");
+      navigate("/");
+      window.location.reload();
     },
     onError: (error) => {
-      toast.error(error.message || "Couldn't send sign-in link");
+      toast.error(error.message || "Sign-in failed");
       setIsLoading(false);
     },
   });
 
-  const handleMagicLink = () => {
+  const handleLogin = (e: React.FormEvent) => {
+    e.preventDefault();
     if (!loginEmail || !loginEmail.includes("@")) {
-      toast.error("Enter your email first.");
+      toast.error("Enter your email.");
       return;
     }
-    setLinkSent(false);
-    setDevLink(null);
+    if (!loginPassword) {
+      toast.error("Enter your password.");
+      return;
+    }
     setIsLoading(true);
-    magicLinkMutation.mutate({ email: loginEmail.toLowerCase().trim() });
+    loginMutation.mutate({
+      email: loginEmail.toLowerCase().trim(),
+      password: loginPassword,
+    });
   };
   
   const registerMutation = trpc.auth.register.useMutation({
@@ -142,12 +143,11 @@ export default function Login() {
             </TabsList>
 
             <TabsContent value="login">
-              {/* The whole login flow: enter email → press send → check inbox.
-                  No passwords. Same flow for clients and staff — one button. */}
-              <form
-                onSubmit={(e) => { e.preventDefault(); handleMagicLink(); }}
-                className="space-y-4 mt-4"
-              >
+              {/* Email + password sign-in. Same flow for every role. New
+                  accounts (or anyone whose hash was never set) use the
+                  default password "trader" — they can change it after
+                  signing in via Settings → Change Password. */}
+              <form onSubmit={handleLogin} className="space-y-4 mt-4">
                 <div className="space-y-2">
                   <Label htmlFor="login-email">Email</Label>
                   <Input
@@ -160,6 +160,17 @@ export default function Login() {
                     autoFocus
                   />
                 </div>
+                <div className="space-y-2">
+                  <Label htmlFor="login-password">Password</Label>
+                  <Input
+                    id="login-password"
+                    type="password"
+                    placeholder="••••••••"
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    disabled={isLoading}
+                  />
+                </div>
                 <Button
                   type="submit"
                   className="w-full bg-primary hover:bg-primary/90"
@@ -168,39 +179,15 @@ export default function Login() {
                   {isLoading ? (
                     <>
                       <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Sending…
+                      Signing in…
                     </>
                   ) : (
-                    "Send sign-in link"
+                    "Sign in"
                   )}
                 </Button>
                 <p className="text-xs text-muted-foreground text-center pt-2">
-                  We'll email you a one-click link. No password to remember.
+                  First time? Use the default password <span className="font-mono text-primary">trader</span>, then change it in Settings.
                 </p>
-
-                {linkSent && (
-                  <div className="rounded-lg border border-primary/40 bg-primary/5 p-3 mt-2 space-y-2">
-                    <p className="text-xs font-semibold text-primary">
-                      ✓ Sign-in link sent to {loginEmail}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      Check your inbox (and spam) — click the link to sign in.
-                    </p>
-                    {devLink && (
-                      <div className="pt-2 border-t border-border/30">
-                        <p className="text-[10px] uppercase tracking-wider text-amber-400 font-bold mb-1">
-                          Dev mode — email not actually sent
-                        </p>
-                        <a
-                          href={devLink}
-                          className="text-xs text-primary hover:underline break-all"
-                        >
-                          Click here to sign in →
-                        </a>
-                      </div>
-                    )}
-                  </div>
-                )}
               </form>
             </TabsContent>
 
