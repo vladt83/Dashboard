@@ -67,13 +67,15 @@ export function buildBaseApp(): Express {
           connectionString: url,
           ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
           max: 1,
-          connectionTimeoutMillis: 5000,
+          // 20s budget — long enough for Neon serverless wake-from-pause
+          // (typically 3-10s but can spike higher on cold compute).
+          connectionTimeoutMillis: 20000,
         });
         try {
           const result = (await Promise.race([
             pool.query("SELECT 1 as ok"),
             new Promise((_, reject) =>
-              setTimeout(() => reject(new Error("query-timeout-7s")), 7000)
+              setTimeout(() => reject(new Error("query-timeout-25s")), 25000)
             ),
           ])) as { rows: unknown[] };
           db = { ok: true, ms: Date.now() - start, rows: result.rows.length, urlSource };
