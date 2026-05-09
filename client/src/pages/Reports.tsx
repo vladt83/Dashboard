@@ -43,66 +43,46 @@ export default function Reports() {
     return `${value.toFixed(1)}%`;
   };
 
-  // Calculate metrics from deals
+  // Headline numbers come from server-merged stats, which combines live `deals`
+  // with imported `dailyStats` (the spreadsheet backfill). Payment-type splits
+  // and projected recurring stay client-side off `deals` because dailyStats
+  // doesn't carry payment-type detail — those buckets reflect live deals only.
   const calculateMetrics = () => {
-    if (!deals || deals.length === 0) {
-      return {
-        totalRevenue: 0,
-        totalCashCollected: 0,
-        avgDealSize: 0,
-        closeRate: 0,
-        showRate: 0,
-        preparedRate: 0,
-        payInFullRevenue: 0,
-        paymentPlanRevenue: 0,
-        bnplRevenue: 0,
-        payInFullCount: 0,
-        paymentPlanCount: 0,
-        bnplCount: 0,
-        totalCommissions: 0,
-        commissionRatio: 0,
-        projectedRecurring: 0,
-        dealsCount: 0,
-        closedDeals: 0,
-        showedDeals: 0,
-        preparedDeals: 0,
-      };
-    }
-    
-    const totalRevenue = deals.reduce((sum, d) => sum + parseFloat(d.totalDealAmount || "0"), 0);
-    const totalCashCollected = deals.reduce((sum, d) => 
+    const dealList = deals ?? [];
+    const dealsCount = stats?.dealCount ?? dealList.length;
+    const closedDeals = stats?.closedCount ?? dealList.filter(d => d.closed).length;
+    const showedDeals = stats?.showedCount ?? dealList.filter(d => d.showed).length;
+    const preparedDeals = stats?.preparedCount ?? dealList.filter(d => d.prepared).length;
+    const totalRevenue = stats?.totalRevenue ?? dealList.reduce((sum, d) => sum + parseFloat(d.totalDealAmount || "0"), 0);
+    const totalCashCollected = stats?.totalCashCollected ?? dealList.reduce((sum, d) =>
       sum + parseFloat(d.newCashCollected || "0") + parseFloat(d.existingCashCollected || "0"), 0);
-    
-    const closedDeals = deals.filter(d => d.closed).length;
-    const showedDeals = deals.filter(d => d.showed).length;
-    const preparedDeals = deals.filter(d => d.prepared).length;
-    
+    const closerCommissionsTotal = stats?.totalCloserCommission ?? dealList.reduce((sum, d) =>
+      sum + parseFloat(d.closerCommission || "0"), 0);
+
     const avgDealSize = closedDeals > 0 ? totalRevenue / closedDeals : 0;
     const closeRate = showedDeals > 0 ? (closedDeals / showedDeals) * 100 : 0;
-    const showRate = deals.length > 0 ? (showedDeals / deals.length) * 100 : 0;
+    const showRate = dealsCount > 0 ? (showedDeals / dealsCount) * 100 : 0;
     const preparedRate = showedDeals > 0 ? (preparedDeals / showedDeals) * 100 : 0;
-    
-    // Revenue by payment type
-    const payInFullDeals = deals.filter(d => d.paymentType === "full_pay" && d.closed);
-    const paymentPlanDeals = deals.filter(d => d.paymentType === "in_house_payment_plan" && d.closed);
-    const bnplDeals = deals.filter(d => d.paymentType === "bnpl" && d.closed);
-    
-    const payInFullRevenue = payInFullDeals.reduce((sum, d) => 
+
+    // Payment-type splits: live deals only (dailyStats has no paymentType).
+    const payInFullDeals = dealList.filter(d => d.paymentType === "full_pay" && d.closed);
+    const paymentPlanDeals = dealList.filter(d => d.paymentType === "in_house_payment_plan" && d.closed);
+    const bnplDeals = dealList.filter(d => d.paymentType === "bnpl" && d.closed);
+
+    const payInFullRevenue = payInFullDeals.reduce((sum, d) =>
       sum + parseFloat(d.newCashCollected || "0") + parseFloat(d.existingCashCollected || "0"), 0);
-    const paymentPlanRevenue = paymentPlanDeals.reduce((sum, d) => 
+    const paymentPlanRevenue = paymentPlanDeals.reduce((sum, d) =>
       sum + parseFloat(d.newCashCollected || "0") + parseFloat(d.existingCashCollected || "0"), 0);
-    const bnplRevenue = bnplDeals.reduce((sum, d) => 
+    const bnplRevenue = bnplDeals.reduce((sum, d) =>
       sum + parseFloat(d.newCashCollected || "0") + parseFloat(d.existingCashCollected || "0"), 0);
-    
-    // Total commissions
-    const totalCommissions = deals.reduce((sum, d) => 
-      sum + parseFloat(d.closerCommission || "0") + 
-      parseFloat(d.setterCashCommission || "0") + 
-      parseFloat(d.setterShowCommission || "0"), 0);
-    
+
+    // Setter commissions only exist on live deal rows; closer commissions come
+    // from the merged stats so historical imports contribute.
+    const setterCommissions = dealList.reduce((sum, d) =>
+      sum + parseFloat(d.setterCashCommission || "0") + parseFloat(d.setterShowCommission || "0"), 0);
+    const totalCommissions = closerCommissionsTotal + setterCommissions;
     const commissionRatio = totalCashCollected > 0 ? (totalCommissions / totalCashCollected) * 100 : 0;
-    
-    // Projected recurring from payment plans
+
     const projectedRecurring = paymentPlanDeals.reduce((sum, d) => {
       const monthlyAmount = parseFloat(d.monthlyAmount || "0");
       const totalMonths = d.totalMonths || 0;
@@ -110,7 +90,7 @@ export default function Reports() {
       const remainingMonths = Math.max(0, totalMonths - paidMonths);
       return sum + (monthlyAmount * remainingMonths);
     }, 0);
-    
+
     return {
       totalRevenue,
       totalCashCollected,
@@ -127,7 +107,7 @@ export default function Reports() {
       totalCommissions,
       commissionRatio,
       projectedRecurring,
-      dealsCount: deals.length,
+      dealsCount,
       closedDeals,
       showedDeals,
       preparedDeals,
@@ -296,7 +276,7 @@ export default function Reports() {
                 <PieChart className="h-5 w-5 text-[#c7ab77]" />
                 Payment Type Distribution
               </CardTitle>
-              <CardDescription>How clients are paying</CardDescription>
+              <CardDescription>How clients are paying — live deal entries only</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               {/* Pay In Full */}
