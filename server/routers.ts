@@ -1672,7 +1672,7 @@ export const appRouter = router({
         }
 
         const today = new Date().toISOString().slice(0, 10);
-        return createBookedCall({
+        const booking = await createBookedCall({
           setterId,
           closerId: input.closerId,
           clientFirstName: input.clientFirstName,
@@ -1681,6 +1681,77 @@ export const appRouter = router({
           bookedDate: input.bookedDate ?? today,
           notes: input.notes ?? null,
         });
+
+        // Notify the closer over email. Best-effort: any failure here is
+        // logged and swallowed so the setter still gets a successful response.
+        try {
+          const closer = await getTeamMemberById(input.closerId);
+          const setterMember = await getTeamMemberById(setterId);
+          if (closer?.name) {
+            const dbInst = await getDb();
+            if (dbInst) {
+              const { users: usersTable } = await import("../drizzle/schema");
+              const [closerUser] = await dbInst.select().from(usersTable)
+                .where(eq(usersTable.name, closer.name));
+              if (closerUser?.email) {
+                const fullName = `${input.clientFirstName} ${input.clientLastName}`.trim();
+                const setterName = setterMember?.name ?? "Your setter";
+                const dateStr = booking.bookedDate;
+                const firstName = closerUser.name?.split(" ")[0] ?? "Hi";
+                const notesBlock = input.notes ? `\n\nNotes:\n${input.notes}` : "";
+                const appUrl = process.env.APP_URL || "https://app.traderfoundation.com";
+                const { sendEmail } = await import("./email");
+                await sendEmail({
+                  to: { email: closerUser.email, name: closerUser.name ?? undefined },
+                  subject: `New call booked — ${fullName}`,
+                  text: [
+                    `${firstName},`,
+                    ``,
+                    `${setterName} just booked you a call.`,
+                    ``,
+                    `Client:    ${fullName}`,
+                    `Phone:     ${input.phoneNumber}`,
+                    `Date:      ${dateStr}`,
+                    `Setter:    ${setterName}`,
+                    notesBlock,
+                    ``,
+                    `It's also queued in your dashboard under Setter Intel:`,
+                    `${appUrl}/setter-bookings`,
+                    ``,
+                    `— Trader Foundation`,
+                  ].join("\n"),
+                  html: `
+<!DOCTYPE html>
+<html>
+<body style="margin:0; padding:24px; background:#0a0a0a; color:#cfcfcf; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">
+  <div style="max-width:520px; margin:0 auto; background:#161616; border:1px solid #2a2620; border-radius:12px; padding:32px;">
+    <p style="color:#c7ab77; font-size:11px; text-transform:uppercase; letter-spacing:2px; margin:0 0 8px 0;">Trader Foundation</p>
+    <h1 style="color:#c7ab77; font-size:22px; margin:0 0 16px 0;">New call booked</h1>
+    <p style="margin:0 0 16px 0; line-height:1.6;">${firstName}, <strong>${setterName}</strong> just booked you a call.</p>
+    <table style="width:100%; border-collapse:collapse; margin:16px 0; font-size:14px;">
+      <tr><td style="padding:8px 0; color:#8a8a8a; width:90px;">Client</td><td style="padding:8px 0;"><strong>${fullName}</strong></td></tr>
+      <tr><td style="padding:8px 0; color:#8a8a8a;">Phone</td><td style="padding:8px 0;"><a href="tel:${input.phoneNumber}" style="color:#c7ab77; text-decoration:none;">${input.phoneNumber}</a></td></tr>
+      <tr><td style="padding:8px 0; color:#8a8a8a;">Date</td><td style="padding:8px 0;">${dateStr}</td></tr>
+      <tr><td style="padding:8px 0; color:#8a8a8a;">Setter</td><td style="padding:8px 0;">${setterName}</td></tr>
+    </table>
+    ${input.notes ? `<div style="margin:16px 0; padding:12px 16px; background:#0f0f0f; border-left:3px solid #c7ab77; border-radius:4px;"><p style="margin:0 0 4px 0; font-size:11px; color:#8a8a8a; text-transform:uppercase; letter-spacing:1px;">Notes</p><p style="margin:0; line-height:1.6; white-space:pre-wrap;">${input.notes.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</p></div>` : ""}
+    <a href="${appUrl}/setter-bookings" style="display:inline-block; margin-top:16px; padding:10px 20px; background:#c7ab77; color:#0a0a0a; text-decoration:none; border-radius:6px; font-weight:600;">View in dashboard</a>
+    <p style="margin:24px 0 0 0; padding-top:16px; border-top:1px solid #2a2620; font-size:12px; color:#8a8a8a; line-height:1.6;">— Trader Foundation</p>
+  </div>
+</body>
+</html>`.trim(),
+                  dedupeKey: `booking_to_closer:${booking.id}`,
+                  relatedUserId: closerUser.id,
+                  triggeredByUserId: ctx.user.id,
+                });
+              }
+            }
+          }
+        } catch (err) {
+          console.error("[bookedCalls.create] closer email failed:", err);
+        }
+
+        return booking;
       }),
 
     // Setter views her own bookings. Admin can pass setterId.
