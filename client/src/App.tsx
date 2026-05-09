@@ -192,6 +192,7 @@ function AuthenticatedRouter() {
         <Route path="/payroll" component={PayrollDashboard} />
         <Route path="/payment-plans" component={PaymentPlans} />
         <Route path="/onboarding" component={Onboarding} />
+        <Route path="/clients" component={ClientDirectory} />
         <Route path="/clients/:dealId" component={ClientProfile} />
         <Route path="/reports" component={Reports} />
         <Route path="/my-deals" component={MyDeals} />
