@@ -97,6 +97,28 @@ export default function NewDeal() {
     }
   }, [isAdmin, myTeamLink, saleForm.closerId]);
 
+  // CRM hand-off from My Deals: if ?bookingId=N is in the URL, auto-fill the
+  // setter and client name from that booking and mark it as the linked
+  // source so it gets dropped from "Pending" once the deal is saved.
+  useEffect(() => {
+    if (linkedSource) return;                        // already filled
+    if (!myBookings.data) return;                    // wait for bookings
+    const params = new URLSearchParams(window.location.search);
+    const raw = params.get("bookingId");
+    if (!raw) return;
+    const id = parseInt(raw, 10);
+    if (!Number.isFinite(id)) return;
+    const b = myBookings.data.find(x => x.id === id);
+    if (!b || b.dealId) return;
+    setSaleForm(prev => ({
+      ...prev,
+      setterId: String(b.setterId),
+      clientName: `${b.clientFirstName} ${b.clientLastName}`.trim(),
+    }));
+    setLinkedSource({ type: "booking", id: b.id });
+    setManualEntry(false);
+  }, [myBookings.data, linkedSource]);
+
   // Create deal mutation
   const createDeal = trpc.deals.create.useMutation({
     onSuccess: async (deal) => {

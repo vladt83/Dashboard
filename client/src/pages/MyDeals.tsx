@@ -16,7 +16,8 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { format } from "date-fns";
-import { Link } from "wouter";
+import { Link, useLocation } from "wouter";
+import { Phone, Sparkles } from "lucide-react";
 
 export default function MyDeals() {
   const { user } = useAuth();
@@ -56,6 +57,24 @@ export default function MyDeals() {
 
   // Setters list — needed for the setter-attribution dropdown in the edit dialog.
   const { data: setters } = trpc.team.getByRole.useQuery({ role: "setter" });
+
+  // Pending calls assigned to this closer that haven't been converted to a
+  // deal yet. Drives the CRM-style hand-off: setter books → the prospect
+  // shows up here → closer clicks → New Entry pre-fills client name + setter.
+  const pendingBookingsQuery = trpc.bookedCalls.listAssignedToMe.useQuery(
+    isAdmin && selectedCloserId ? { closerId: selectedCloserId } : undefined,
+    { enabled: !!selectedCloserId }
+  );
+  const setterNameById = (() => {
+    const m = new Map<number, string>();
+    (setters ?? []).forEach(s => m.set(s.id, s.name));
+    return m;
+  })();
+  const pendingBookings = (pendingBookingsQuery.data ?? []).filter(b => !b.dealId);
+  const [, navigate] = useLocation();
+  const startDealFromBooking = (bookingId: number) => {
+    navigate(`/deals/new?bookingId=${bookingId}`);
+  };
 
   // We invalidate every dependent namespace after a save so the dashboard,
   // leaderboard, payroll summary, sales tracker, and setter payouts all
@@ -303,7 +322,67 @@ export default function MyDeals() {
             </CardContent>
           </Card>
         ) : null}
-        
+
+        {/* Pending Calls — bookings assigned to this closer that haven't been
+            converted to a deal yet. Click "Start Deal Entry" to flow the
+            client straight into New Entry with name + setter pre-filled. */}
+        {selectedCloserId && pendingBookings.length > 0 && (
+          <Card className="border-[#c7ab77]/30 bg-[#c7ab77]/5">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-[#c7ab77]">
+                <Phone className="h-5 w-5" />
+                Pending Calls ({pendingBookings.length})
+              </CardTitle>
+              <CardDescription className="text-zinc-300">
+                Bookings the setter handed off to you that haven't been logged as a deal yet. Click <strong>Start Deal Entry</strong> after the call — client name and setter come over automatically.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-zinc-800 text-xs uppercase tracking-wider text-zinc-400">
+                      <th className="text-left py-2 px-2 font-semibold">Client</th>
+                      <th className="text-left py-2 px-2 font-semibold">Phone</th>
+                      <th className="text-left py-2 px-2 font-semibold">Setter</th>
+                      <th className="text-left py-2 px-2 font-semibold">Source</th>
+                      <th className="text-left py-2 px-2 font-semibold">Booked</th>
+                      <th className="text-right py-2 px-2 font-semibold">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pendingBookings.map(b => {
+                      const sourceLabel =
+                        b.callSource === "meta" ? "Meta"
+                        : b.callSource === "existing_client" ? "Existing client"
+                        : "—";
+                      return (
+                        <tr key={b.id} className="border-b border-zinc-800/60 hover:bg-zinc-900/40 cursor-pointer" onClick={() => startDealFromBooking(b.id)}>
+                          <td className="py-3 px-2 font-medium text-white">{b.clientFirstName} {b.clientLastName}</td>
+                          <td className="py-3 px-2 text-zinc-300">{b.phoneNumber}</td>
+                          <td className="py-3 px-2 text-zinc-300">{setterNameById.get(b.setterId) ?? `Setter #${b.setterId}`}</td>
+                          <td className="py-3 px-2 text-zinc-300">{sourceLabel}</td>
+                          <td className="py-3 px-2 text-zinc-400 text-xs">{b.bookedDate}</td>
+                          <td className="py-3 px-2 text-right">
+                            <Button
+                              size="sm"
+                              className="bg-[#c7ab77] hover:bg-[#c7ab77]/90 text-zinc-950"
+                              onClick={(e) => { e.stopPropagation(); startDealFromBooking(b.id); }}
+                            >
+                              <Sparkles className="h-3.5 w-3.5 mr-1" />
+                              Start Deal Entry
+                            </Button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
         {/* Deals List */}
         {selectedCloserId && (
           <Card className="border-zinc-800 bg-zinc-900/50">
