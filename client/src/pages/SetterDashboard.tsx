@@ -71,6 +71,7 @@ export default function SetterDashboard() {
     phoneNumber: "",
     closerId: "",
     notes: "",
+    callSource: "" as "" | "meta" | "existing_client",
   });
 
   // ─── VSL Prep form state (VSL setter — Jake) ───────────────────────────
@@ -100,7 +101,7 @@ export default function SetterDashboard() {
   const bookCall = trpc.bookedCalls.create.useMutation({
     onSuccess: () => {
       toast.success("Call booked.");
-      setBookForm({ clientFirstName: "", clientLastName: "", phoneNumber: "", closerId: "", notes: "" });
+      setBookForm({ clientFirstName: "", clientLastName: "", phoneNumber: "", closerId: "", notes: "", callSource: "" });
       myBookingsQuery.refetch();
       setTab("bookings");
     },
@@ -143,12 +144,14 @@ export default function SetterDashboard() {
     if (!bookForm.clientFirstName.trim() || !bookForm.clientLastName.trim()) return toast.error("First and last name are required.");
     if (!bookForm.phoneNumber.trim() || bookForm.phoneNumber.replace(/\D/g, "").length < 7) return toast.error("Phone number is required.");
     if (!bookForm.closerId) return toast.error("Pick the closer this call is assigned to.");
+    if (!bookForm.callSource) return toast.error("Pick the source — Meta or existing client. Marketing ROI depends on this split.");
     bookCall.mutate({
       clientFirstName: bookForm.clientFirstName.trim(),
       clientLastName: bookForm.clientLastName.trim(),
       phoneNumber: bookForm.phoneNumber.trim(),
       closerId: parseInt(bookForm.closerId),
       notes: bookForm.notes.trim() || undefined,
+      callSource: bookForm.callSource,
     });
   };
 
@@ -265,6 +268,19 @@ export default function SetterDashboard() {
                     </SelectContent>
                   </Select>
                 </div>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="callSource">Source</Label>
+                <Select value={bookForm.callSource} onValueChange={v => setBookForm(f => ({ ...f, callSource: v as "meta" | "existing_client" }))}>
+                  <SelectTrigger id="callSource"><SelectValue placeholder="Pick source" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="meta">Meta (paid ad / new prospect)</SelectItem>
+                    <SelectItem value="existing_client">Existing client (upsell / referral)</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Splits the Marketing Report so ad spend ROI doesn't get mixed with existing-book revenue. Pick accurately every time.
+                </p>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="notes">Notes (optional)</Label>

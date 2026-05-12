@@ -2260,6 +2260,53 @@ export async function createBookedCall(input: InsertBookedCall): Promise<BookedC
   return row;
 }
 
+/**
+ * Roll up bookings for a month split by `callSource` (Meta vs existing
+ * client). Joins each booking to its linked deal (if any) so we can also
+ * report closes / cash / revenue per source — what the Marketing Report
+ * needs to compute Meta ROI against the existing-book contribution.
+ */
+export async function getBookingsBySource(year: number, month: number): Promise<{
+  meta: { booked: number; closed: number; cash: number; revenue: number };
+  existingClient: { booked: number; closed: number; cash: number; revenue: number };
+  unset: { booked: number; closed: number; cash: number; revenue: number };
+}> {
+  const empty = { booked: 0, closed: 0, cash: 0, revenue: 0 };
+  const result = {
+    meta: { ...empty },
+    existingClient: { ...empty },
+    unset: { ...empty },
+  };
+  const db = await getDb();
+  if (!db) return result;
+
+  const { start, end } = dateRangeForMonth(year, month);
+  const rows = await db
+    .select({
+      callSource: bookedCalls.callSource,
+      bookingCount: sql<number>`count(*)::int`,
+      closedCount: sql<number>`count(${deals.id}) FILTER (WHERE ${deals.closed} = true)::int`,
+      totalCash: sql<number>`coalesce(sum(CASE WHEN ${deals.closed} = true THEN ${deals.newCashCollected}::numeric + ${deals.existingCashCollected}::numeric ELSE 0 END), 0)::float`,
+      totalRevenue: sql<number>`coalesce(sum(CASE WHEN ${deals.closed} = true THEN ${deals.totalDealAmount}::numeric ELSE 0 END), 0)::float`,
+    })
+    .from(bookedCalls)
+    .leftJoin(deals, eq(deals.id, bookedCalls.dealId))
+    .where(and(sql`${bookedCalls.bookedDate} >= ${start}`, sql`${bookedCalls.bookedDate} <= ${end}`))
+    .groupBy(bookedCalls.callSource);
+
+  for (const r of rows) {
+    const bucket =
+      r.callSource === "meta" ? "meta"
+      : r.callSource === "existing_client" ? "existingClient"
+      : "unset";
+    result[bucket].booked = Number(r.bookingCount);
+    result[bucket].closed = Number(r.closedCount);
+    result[bucket].cash = Number(r.totalCash);
+    result[bucket].revenue = Number(r.totalRevenue);
+  }
+  return result;
+}
+
 export async function getBookedCallById(id: number): Promise<BookedCall | null> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");

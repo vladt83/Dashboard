@@ -41,6 +41,12 @@ export const tradingLogEnum = pgEnum("trading_log", ["yes", "no", "too_new"]);
 // Call Setting tabs) and lets us split the commission rate per lane.
 export const setterMotionEnum = pgEnum("setter_motion", ["vsl", "text"]);
 
+// Where the booked call came from. `meta` = paid Meta/Facebook ads (new
+// prospect). `existing_client` = upsell / referral / renewal from someone
+// already in the program. Used to split the Marketing Report so ad spend
+// ROI doesn't get muddled with existing-book revenue.
+export const callSourceEnum = pgEnum("call_source", ["meta", "existing_client"]);
+
 // Extension reminder milestones — anchored to dealOnboardings.onboardedAt:
 //   window_open    → onboardedAt + 69 days  (T-21 — renewal window opens)
 //   one_week_left  → onboardedAt + 83 days  (T-7  — escalate)
@@ -444,6 +450,10 @@ export const bookedCalls = pgTable("bookedCalls", {
   phoneNumber: varchar("phoneNumber", { length: 32 }).notNull(),
   bookedDate: date("bookedDate", { mode: "string" }).notNull(),
   notes: text("notes"),
+  // Source of the booking: 'meta' (paid ad) vs 'existing_client' (upsell/
+  // referral). Nullable so legacy rows imported before this field don't
+  // break — the Marketing Report counts unset rows as "unknown source."
+  callSource: callSourceEnum("callSource"),
   // Set when the closer links a deal back to this booking. Nullable.
   dealId: integer("dealId"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),

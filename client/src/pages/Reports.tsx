@@ -16,6 +16,7 @@ export default function Reports() {
   const { data: stats } = trpc.stats.getMonthly.useQuery({ year, month });
   const { data: closerLeaderboard } = trpc.stats.getCloserLeaderboard.useQuery({ year, month });
   const { data: paymentPlans } = trpc.deals.getPaymentPlans.useQuery({ year, month });
+  const { data: bookingsBySource } = trpc.bookedCalls.bySource.useQuery({ year, month });
   
   const navigateMonth = (direction: "prev" | "next") => {
     setCurrentDate(prev => {
@@ -323,6 +324,70 @@ export default function Reports() {
             </CardContent>
           </Card>
         </div>
+
+        {/* Bookings by Source — Meta paid traffic vs existing-client upsells/referrals */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Target className="h-5 w-5 text-[#c7ab77]" />
+              Bookings by Source
+            </CardTitle>
+            <CardDescription>
+              Setter-tagged origin of each booked call. Meta = paid ad / cold prospect. Existing Client = upsell / referral / renewal. Drives ad ROI math.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {(() => {
+              const buckets = [
+                { key: "meta" as const, label: "Meta (paid ad)", color: "bg-blue-500" },
+                { key: "existingClient" as const, label: "Existing client", color: "bg-amber-500" },
+                { key: "unset" as const, label: "Unset (legacy / not tagged)", color: "bg-zinc-600" },
+              ];
+              const totals = bookingsBySource ?? { meta: { booked:0, closed:0, cash:0, revenue:0 }, existingClient: { booked:0, closed:0, cash:0, revenue:0 }, unset: { booked:0, closed:0, cash:0, revenue:0 } };
+              const totalBooked = totals.meta.booked + totals.existingClient.booked + totals.unset.booked;
+              return (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {buckets.map(b => {
+                    const v = totals[b.key];
+                    const closeRate = v.booked > 0 ? (v.closed / v.booked) * 100 : 0;
+                    const shareOfBookings = totalBooked > 0 ? (v.booked / totalBooked) * 100 : 0;
+                    if (b.key === "unset" && v.booked === 0) return null;
+                    return (
+                      <div key={b.key} className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-semibold text-white">{b.label}</span>
+                          <span className="text-xs text-zinc-500">{formatPercent(shareOfBookings)} of bookings</span>
+                        </div>
+                        <div className={`h-1.5 ${b.color} rounded-full`} style={{ width: `${Math.max(shareOfBookings, 2)}%` }} />
+                        <div className="grid grid-cols-2 gap-2 text-sm pt-1">
+                          <div>
+                            <p className="text-xs text-zinc-500">Booked</p>
+                            <p className="font-semibold text-white">{v.booked}</p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-zinc-500">Closed</p>
+                            <p className="font-semibold text-white">{v.closed} <span className="text-xs text-zinc-500">({formatPercent(closeRate)})</span></p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-zinc-500">Cash</p>
+                            <p className="font-semibold text-green-400">{formatCurrency(v.cash)}</p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-zinc-500">Revenue</p>
+                            <p className="font-semibold text-white">{formatCurrency(v.revenue)}</p>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {totalBooked === 0 && (
+                    <p className="col-span-full text-sm text-zinc-500 py-4 text-center">No bookings recorded for this month yet.</p>
+                  )}
+                </div>
+              );
+            })()}
+          </CardContent>
+        </Card>
 
         {/* Financial Metrics */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

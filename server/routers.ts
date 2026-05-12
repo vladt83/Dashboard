@@ -66,6 +66,7 @@ import {
   createBookedCall,
   getBookedCallById,
   getBookedCallsBySetter,
+  getBookingsBySource,
   getBookedCallsByCloser,
   getAllBookedCalls,
   updateBookedCall,
@@ -1646,6 +1647,7 @@ export const appRouter = router({
         closerId: z.number().int().positive(),
         bookedDate: z.string().optional(),     // defaults to today
         notes: z.string().optional(),
+        callSource: z.enum(["meta", "existing_client"]).optional(),
         setterId: z.number().int().positive().optional(), // admin override
       }))
       .mutation(async ({ input, ctx }) => {
@@ -1680,6 +1682,7 @@ export const appRouter = router({
           phoneNumber: input.phoneNumber,
           bookedDate: input.bookedDate ?? today,
           notes: input.notes ?? null,
+          callSource: input.callSource ?? null,
         });
 
         // Notify the closer over email. Best-effort: any failure here is
@@ -1700,6 +1703,11 @@ export const appRouter = router({
                 const firstName = closerUser.name?.split(" ")[0] ?? "Hi";
                 const notesBlock = input.notes ? `\n\nNotes:\n${input.notes}` : "";
                 const appUrl = process.env.APP_URL || "https://app.traderfoundation.com";
+                const sourceLabel = input.callSource === "meta"
+                  ? "Meta (paid ad)"
+                  : input.callSource === "existing_client"
+                    ? "Existing client"
+                    : null;
                 const { sendEmail } = await import("./email");
                 await sendEmail({
                   to: { email: closerUser.email, name: closerUser.name ?? undefined },
@@ -1713,6 +1721,7 @@ export const appRouter = router({
                     `Phone:     ${input.phoneNumber}`,
                     `Date:      ${dateStr}`,
                     `Setter:    ${setterName}`,
+                    ...(sourceLabel ? [`Source:    ${sourceLabel}`] : []),
                     notesBlock,
                     ``,
                     `It's also queued in your dashboard under Setter Intel:`,
@@ -1733,6 +1742,7 @@ export const appRouter = router({
       <tr><td style="padding:8px 0; color:#8a8a8a;">Phone</td><td style="padding:8px 0;"><a href="tel:${input.phoneNumber}" style="color:#c7ab77; text-decoration:none;">${input.phoneNumber}</a></td></tr>
       <tr><td style="padding:8px 0; color:#8a8a8a;">Date</td><td style="padding:8px 0;">${dateStr}</td></tr>
       <tr><td style="padding:8px 0; color:#8a8a8a;">Setter</td><td style="padding:8px 0;">${setterName}</td></tr>
+      ${sourceLabel ? `<tr><td style="padding:8px 0; color:#8a8a8a;">Source</td><td style="padding:8px 0;">${sourceLabel}</td></tr>` : ""}
     </table>
     ${input.notes ? `<div style="margin:16px 0; padding:12px 16px; background:#0f0f0f; border-left:3px solid #c7ab77; border-radius:4px;"><p style="margin:0 0 4px 0; font-size:11px; color:#8a8a8a; text-transform:uppercase; letter-spacing:1px;">Notes</p><p style="margin:0; line-height:1.6; white-space:pre-wrap;">${input.notes.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</p></div>` : ""}
     <a href="${appUrl}/setter-bookings" style="display:inline-block; margin-top:16px; padding:10px 20px; background:#c7ab77; color:#0a0a0a; text-decoration:none; border-radius:6px; font-weight:600;">View in dashboard</a>
@@ -1783,6 +1793,14 @@ export const appRouter = router({
     listAll: adminProcedure.query(async () => {
       return getAllBookedCalls();
     }),
+
+    // Marketing Report — bookings grouped by callSource (Meta vs Existing
+    // Client) for a month, with closed/cash/revenue from any linked deals.
+    bySource: protectedProcedure
+      .input(z.object({ year: z.number(), month: z.number().min(1).max(12) }))
+      .query(async ({ input }) => {
+        return getBookingsBySource(input.year, input.month);
+      }),
 
     update: protectedProcedure
       .input(z.object({
