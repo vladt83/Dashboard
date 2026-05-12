@@ -80,6 +80,9 @@ export default function MyDeals() {
   // leaderboard, payroll summary, sales tracker, and setter payouts all
   // reflect the new numbers without a manual refresh.
   const utils = trpc.useUtils();
+  // Anywhere a deal's numbers show up — refresh after an edit/delete so the
+  // closer sees the updated cash, commission, and downstream rollups
+  // immediately instead of having to navigate away and back.
   const invalidateEverythingDealLevel = async () => {
     await Promise.all([
       utils.deals.invalidate(),
@@ -88,6 +91,9 @@ export default function MyDeals() {
       utils.salesTracker.invalidate(),
       utils.payeePayments.invalidate(),
       utils.setter.invalidate(),
+      utils.bookedCalls.invalidate(),
+      utils.payroll.invalidate(),
+      utils.paymentPlans.invalidate(),
     ]);
   };
 
@@ -162,7 +168,6 @@ export default function MyDeals() {
       fullyPaid: !!deal.fullyPaid,
       totalDealAmount: String(parseFloat(deal.totalDealAmount || "0")),
       newCashCollected: String(parseFloat(deal.newCashCollected || "0")),
-      existingCashCollected: String(parseFloat(deal.existingCashCollected || "0")),
       bnplFee: String(parseFloat(deal.bnplFee || "0")),
       downPayment: String(parseFloat(deal.downPayment || "0")),
       monthlyAmount: String(parseFloat(deal.monthlyAmount || "0")),
@@ -189,7 +194,9 @@ export default function MyDeals() {
       isNewClient: editForm.isNewClient,
       fullyPaid: editForm.fullyPaid,
       totalDealAmount: parseFloat(editForm.totalDealAmount) || 0,
-      existingCashCollected: parseFloat(editForm.existingCashCollected) || 0,
+      // Drop the legacy "existing cash" concept — closers only ever enter
+      // money once via newCashCollected; we zero it so totals stay clean.
+      existingCashCollected: 0,
       notes: editNotes,
       docusignSigned: !!editForm.docusignSigned,
     };
@@ -480,10 +487,7 @@ export default function MyDeals() {
                                 </Button>
                               </div>
                             ) : (
-                              formatCurrency(
-                                parseFloat(deal.newCashCollected || "0") +
-                                parseFloat(deal.existingCashCollected || "0")
-                              )
+                              formatCurrency(parseFloat(deal.newCashCollected || "0"))
                             )}
                           </td>
                           <td className="py-3 pr-4 text-right text-sm font-medium">
@@ -689,15 +693,6 @@ export default function MyDeals() {
                     </>
                   )}
 
-                  <div className="space-y-2">
-                    <Label className="text-zinc-300">Existing Client Cash</Label>
-                    <Input
-                      type="number" step="0.01" min="0"
-                      value={editForm.existingCashCollected ?? ""}
-                      onChange={(e) => setEditForm({ ...editForm, existingCashCollected: e.target.value })}
-                      className="border-zinc-700 bg-zinc-800 text-white"
-                    />
-                  </div>
                 </div>
 
                 {/* Live recap of what will be saved as cash collected */}
@@ -821,12 +816,8 @@ export default function MyDeals() {
                       <p className="text-white font-medium">{formatCurrency(viewingDeal.totalDealAmount)}</p>
                     </div>
                     <div>
-                      <Label className="text-zinc-400 text-xs">New Cash Collected</Label>
+                      <Label className="text-zinc-400 text-xs">Cash Collected</Label>
                       <p className="text-[#c7ab77] font-medium">{formatCurrency(viewingDeal.newCashCollected)}</p>
-                    </div>
-                    <div>
-                      <Label className="text-zinc-400 text-xs">Existing Cash Collected</Label>
-                      <p className="text-[#c7ab77] font-medium">{formatCurrency(viewingDeal.existingCashCollected)}</p>
                     </div>
                     <div>
                       <Label className="text-zinc-400 text-xs">Closer Commission</Label>
@@ -889,7 +880,7 @@ export default function MyDeals() {
                           <Label className="text-zinc-400 text-xs">Net Cash (After Fee)</Label>
                           <p className="text-[#c7ab77] font-medium">
                             {formatCurrency(
-                              (parseFloat(viewingDeal.newCashCollected || "0") + parseFloat(viewingDeal.existingCashCollected || "0")) -
+                              parseFloat(viewingDeal.newCashCollected || "0") -
                               parseFloat(viewingDeal.bnplFee || "0")
                             )}
                           </p>
@@ -937,7 +928,6 @@ export default function MyDeals() {
                       setterId: viewingDeal?.setterId,
                       totalDealAmount: viewingDeal?.totalDealAmount || "",
                       newCashCollected: viewingDeal?.newCashCollected || "",
-                      existingCashCollected: viewingDeal?.existingCashCollected || "",
                       notes: viewingDeal?.notes || "",
                     });
                     setIsEditMode(true);
@@ -1008,17 +998,6 @@ export default function MyDeals() {
               </div>
               
               <div className="space-y-2">
-                <Label className="text-zinc-300">Existing Cash Collected</Label>
-                <Input
-                  type="number"
-                  step="0.01"
-                  value={editForm.existingCashCollected || ""}
-                  onChange={(e) => setEditForm({ ...editForm, existingCashCollected: e.target.value })}
-                  className="border-zinc-700 bg-zinc-800 text-white"
-                />
-              </div>
-              
-              <div className="space-y-2">
                 <Label className="text-zinc-300">Notes</Label>
                 <Textarea
                   value={editForm.notes || ""}
@@ -1047,7 +1026,7 @@ export default function MyDeals() {
                     setterId: editForm.setterId,
                     totalDealAmount: parseFloat(editForm.totalDealAmount) || 0,
                     newCashCollected: parseFloat(editForm.newCashCollected) || 0,
-                    existingCashCollected: parseFloat(editForm.existingCashCollected) || 0,
+                    existingCashCollected: 0,
                     notes: editForm.notes,
                   });
                 }}
